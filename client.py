@@ -27,9 +27,12 @@ class LegaloomEnv(EnvClient[TDSAction, TDSObservation, TDSState]):
     """
 
     def _step_payload(self, action: TDSAction) -> Dict:
+        params = action.parameters
+        if hasattr(params, "model_dump"):
+            params = params.model_dump(exclude_none=True)
         return {
             "action_type": action.action_type,
-            "parameters":  action.parameters,
+            "parameters":  params,
         }
 
     def _parse_result(self, payload: Dict) -> StepResult[TDSObservation]:

@@ -162,7 +162,7 @@ There are four tasks of increasing difficulty. Each `reset()` draws a random inv
 
 ## Reward Function
 
-Rewards are shaped across the full trajectory — not just binary end-of-episode.
+Rewards are shaped across the full trajectory with workflow-aware penalties.
 
 | Breakpoint | Reward share | When awarded |
 |---|---|---|
@@ -173,9 +173,12 @@ Rewards are shaped across the full trajectory — not just binary end-of-episode
 | `goods_excluded` | 0.20 | Correct split computation on mixed invoices |
 | `gst_base_correct` | 0.15 | Correct taxable base on GST-bundled invoices |
 | `amount_exact` | 0.30–0.50 | Final TDS amount within ±₹1 of ground truth |
+| `lookup_section` tool-cost | −0.01 to −0.08 | Discourages shortcut overuse |
+| `query_law` tool-cost | −0.02 × usage | Penalises repeated direct-law lookups |
+| Workflow violation | −0.03 to −0.05 | Calling actions out of required sequence |
 | Unknown action | −0.05 | Any unrecognised `action_type` |
 
-Each breakpoint is awarded **at most once per episode**. Total episode score is clamped to [0.0, 1.0].
+Each positive breakpoint is awarded **at most once per episode**. Repeated/invalid actions receive neutral or negative step rewards. Final grader score remains deterministic and bounded to [0.0, 1.0].
 
 ---
 
@@ -233,25 +236,19 @@ Case 3 — Normal TDS:
 
 ## Baseline Scores
 
-Evaluated using `Qwen/Qwen2.5-72B-Instruct` via HuggingFace Inference Router:
+Baseline scores depend on:
 
-| Task | Score | Steps | Notes |
-|---|---|---|---|
-| task_easy | 1.000 | 5 | Correct section, rate, exact amount |
-| task_medium | 1.000 | 5 | Goods excluded, threshold checked correctly |
-| task_hard | 1.000 | 5 | Inoperative PAN detected, 20% correctly applied |
-| task_expert | 1.000 | 5 | 194T partner payment correctly identified |
-| **Average** | **1.000** | | Qwen/Qwen2.5-72B-Instruct via HF Inference |
+- model choice
+- fixed evaluation seed (`OPENENV_SEED`)
+- strict workflow compliance (read_invoice → check_pan → section/threshold reasoning → submit_answer)
+- tool-cost penalties for overusing `lookup_section` / `query_law`
 
-Secondary evaluation using `llama-3.3-70b-versatile` via Groq:
+To generate current reproducible scores, run:
 
-| Task | Score | Notes |
-|---|---|---|
-| task_easy | 0.917 | Occasional GST base confusion on complex invoices |
-| task_medium | 1.000 | |
-| task_hard | 1.000 | |
-| task_expert | 1.000 | Both 194T and 194Q correctly handled |
-| **Average** | **0.979** | |
+```bash
+export OPENENV_SEED=42
+python inference.py
+```
 
 ---
 
@@ -303,6 +300,16 @@ export API_BASE_URL=https://router.huggingface.co/v1
 export MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
 python inference.py
 ```
+
+Inference stdout is strict:
+
+```
+[START] task=<task_id> env=legaloom_env model=<model> seed=<seed>
+[STEP]  step=<n> action=<str> reward=<float> done=<true|false> error=<msg|null>
+[END]   success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
+```
+
+Any diagnostics are emitted to stderr only.
 
 ---
 

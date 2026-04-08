@@ -4,34 +4,51 @@ Defines the typed Action, Observation, and State contracts
 that the agent, server, and client all share.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
+
 from openenv.core.env_server.types import Action, Observation, State
-from pydantic import Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-# ---------------------------------------------------------------------------
-# Reward clamping constants — hackathon requires strictly (0.0, 1.0) exclusive
-# ---------------------------------------------------------------------------
-_REWARD_MIN = 0.05   # never return exactly 0.0
-_REWARD_MAX = 0.95   # never return exactly 1.0
+class _StrictParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-# ---------------------------------------------------------------------------
-# Action — what the agent sends to the environment each step
-# ---------------------------------------------------------------------------
+class ReadInvoiceParams(_StrictParams):
+    pass
+
+
+class CheckPanParams(_StrictParams):
+    pan: str = Field(..., min_length=10, max_length=10)
+
+
+class CheckThresholdParams(_StrictParams):
+    section: str = Field(..., min_length=3, max_length=8)
+    amount: float = Field(..., ge=0)
+
+
+class QueryYtdParams(_StrictParams):
+    pan: str = Field(..., min_length=10, max_length=10)
+
+
+class LookupSectionParams(_StrictParams):
+    description: str = Field(..., min_length=1)
+
+
+class QueryLawParams(_StrictParams):
+    section: str = Field(..., min_length=3, max_length=8)
+
+
+class SubmitAnswerParams(_StrictParams):
+    tds_amount_inr: float = Field(..., ge=0)
+    section: str = Field(..., min_length=3, max_length=20)
+    rate_percent: float = Field(..., ge=0)
+    no_tds: Optional[Union[bool, Literal["true", "false"]]] = None
+
 
 class TDSAction(Action):
     """
     One step the agent takes inside the TDS compliance environment.
-
-    Valid action_types:
-      "read_invoice"     — request the full invoice text (first step)
-      "check_pan"        — verify PAN status for a given PAN number
-      "check_threshold"  — ask if cumulative YTD payments cross the TDS threshold
-      "query_ytd"        — query year-to-date payments to a vendor
-      "lookup_section"   — ask what TDS section applies to a described service
-      "query_law"        — look up the law text for a section
-      "submit_answer"    — submit final TDS deduction in INR (terminates episode)
     """
 
     action_type: str = Field(
@@ -41,46 +58,61 @@ class TDSAction(Action):
             "| query_ytd | lookup_section | query_law | submit_answer"
         ),
     )
-    parameters: Dict[str, Any] = Field(
-        default_factory=dict,
-        description=(
-            "Action-specific parameters. Examples:\n"
-            "  check_pan       -> {pan: 'ABCDE1234F'}\n"
-            "  check_threshold -> {section: '194J', amount: 85000}\n"
-            "  lookup_section  -> {description: 'IT support contract'}\n"
-            "  submit_answer   -> {tds_amount_inr: 8500.0, section: '194J', "
-            "rate_percent: 10.0}"
-        ),
-    )
+    parameters: Union[
+        Dict[str, Any],
+        ReadInvoiceParams,
+        CheckPanParams,
+        CheckThresholdParams,
+        QueryYtdParams,
+        LookupSectionParams,
+        QueryLawParams,
+        SubmitAnswerParams,
+    ] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def validate_parameters(cls, data):
+        if not isinstance(data, dict):
+            return data
 
-# ---------------------------------------------------------------------------
-# Observation — what the environment returns after each step
-# ---------------------------------------------------------------------------
+        action = str(data.get("action_type", "")).strip().lower()
+        params = data.get("parameters") or {}
+
+        if isinstance(params, BaseModel):
+            params = params.model_dump(exclude_none=True)
+
+        if not isinstance(params, dict):
+            raise ValueError("parameters must be an object")
+
+        parser = {
+            "read_invoice": ReadInvoiceParams,
+            "check_pan": CheckPanParams,
+            "check_threshold": CheckThresholdParams,
+            "query_ytd": QueryYtdParams,
+            "lookup_section": LookupSectionParams,
+            "query_law": QueryLawParams,
+            "submit_answer": SubmitAnswerParams,
+        }.get(action)
+
+        if parser is not None:
+            params = parser.model_validate(params).model_dump(exclude_none=True)
+        else:
+            # Keep unknown actions permissive so environment can apply explicit penalties.
+            params = params
+
+        data["parameters"] = params
+        return data
+
 
 class TDSObservation(Observation):
     """
     What the agent sees after each action.
-
-    reward is always strictly in (0.0, 1.0) exclusive — never 0.0 or 1.0.
     """
 
-    # Override reward to always be strictly in (0.0, 1.0) exclusive
     reward: float = Field(
-        default=_REWARD_MIN,
-        description="Reward for this step. Always strictly in (0.0, 1.0) exclusive.",
+        default=0.0,
+        description="Reward for this step. Can be positive, zero, or negative.",
     )
-
-    @field_validator("reward", mode="before")
-    @classmethod
-    def clamp_reward(cls, v: float) -> float:
-        """
-        Enforce hackathon Phase 2 rule: scores must be strictly in (0.0, 1.0).
-        Any value <= 0.0 is raised to _REWARD_MIN.
-        Any value >= 1.0 is lowered to _REWARD_MAX.
-        """
-        v = float(v)
-        return round(min(max(v, _REWARD_MIN), _REWARD_MAX), 4)
 
     invoice_text: str = Field(
         default="",
@@ -112,10 +144,6 @@ class TDSObservation(Observation):
         description="Optional guidance. Empty string on hard difficulty.",
     )
 
-
-# ---------------------------------------------------------------------------
-# State — episode metadata returned by state() endpoint
-# ---------------------------------------------------------------------------
 
 class TDSState(State):
     """

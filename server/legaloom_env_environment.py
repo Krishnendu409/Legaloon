@@ -9,6 +9,7 @@ The hackathon validator rejects exactly 0.0 and exactly 1.0.
 """
 
 from uuid import uuid4
+import os
 
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
@@ -43,14 +44,26 @@ KNOWN_BREAKPOINTS = {
     "amount_exact",
 }
 
-# Reward bounds — strictly open interval required by hackathon
-_R_MIN = 0.05
-_R_MAX = 0.95
+# Step-reward constants
+_R_POSITIVE_BASE = 0.02
+_R_NEUTRAL = 0.0
+_R_PENALTY_INVALID = -0.05
+_R_PENALTY_REPEAT = -0.02
+_R_PENALTY_SHORTCUT = -0.01
+
+# Final scorer bounds
+_FINAL_MIN = 0.0
+_FINAL_MAX = 1.0
 
 
 def _r(v: float) -> float:
-    """Clamp a reward to strictly open (0.0, 1.0)."""
-    return round(min(max(float(v), _R_MIN), _R_MAX), 4)
+    """Clamp final score to [0.0, 1.0]."""
+    return round(min(max(float(v), _FINAL_MIN), _FINAL_MAX), 4)
+
+
+def _step_reward(v: float) -> float:
+    """Normalize step reward representation without clamping polarity."""
+    return round(float(v), 4)
 
 
 class LegaloomEnvironment(Environment):
@@ -64,10 +77,15 @@ class LegaloomEnvironment(Environment):
         self._ytd_queried     = False
         self._law_queried     = False
         self._reward_earned   = {}
-        self._episode_reward  = _R_MIN
+        self._episode_reward  = _R_NEUTRAL
         self._current_task_id = "task_easy"
         self._pan_checked_pan = None
         self._section_found   = None
+        self._threshold_checked = False
+        self._lookup_count = 0
+        self._law_count = 0
+        self._default_seed = int(os.getenv("OPENENV_SEED", "42"))
+        self._episode_seed = None
 
     # ------------------------------------------------------------------
     # reset()
@@ -77,19 +95,26 @@ class LegaloomEnvironment(Environment):
         if task_id not in all_task_ids():
             task_id = "task_easy"
 
-        self._task            = sample_task(task_id, seed=seed)
+        if seed is None:
+            seed = self._default_seed
+        self._episode_seed = int(seed)
+
+        self._task            = sample_task(task_id, seed=self._episode_seed)
         self._current_task_id = task_id
         self._invoice_read    = False
         self._ytd_queried     = False
         self._law_queried     = False
         self._pan_checked_pan = None
         self._section_found   = None
+        self._threshold_checked = False
+        self._lookup_count = 0
+        self._law_count = 0
         self._reward_earned   = {
             key: False
             for key in KNOWN_BREAKPOINTS
             if key in self._task["reward_breakpoints"]
         }
-        self._episode_reward  = _R_MIN   # start just above 0.0
+        self._episode_reward  = _R_NEUTRAL
 
         self._state = TDSState(
             episode_id=str(uuid4()),
@@ -103,12 +128,13 @@ class LegaloomEnvironment(Environment):
 
         return TDSObservation(
             done=False,
-            reward=_R_MIN,
+            reward=_R_NEUTRAL,
             invoice_text="",
             action_result=(
                 f"New episode started. Task: {task_id} "
                 f"({self._task['difficulty']} difficulty). "
                 f"Invoice: {self._task['invoice_id']}. "
+                f"Seed: {self._episode_seed}. "
                 f"You have {self._task['max_steps']} steps. "
                 "Start with action_type='read_invoice'."
             ),
@@ -136,6 +162,8 @@ class LegaloomEnvironment(Environment):
 
             action_type = (action.action_type or "").strip().lower()
             params      = action.parameters or {}
+            if hasattr(params, "model_dump"):
+                params = params.model_dump(exclude_none=True)
 
             handlers = {
                 "read_invoice":    self._handle_read_invoice,
@@ -149,13 +177,18 @@ class LegaloomEnvironment(Environment):
 
             handler = handlers.get(action_type)
             if handler:
+                if action_type != "read_invoice" and not self._invoice_read:
+                    return self._error_obs(
+                        "Workflow violation: read_invoice must be called before other actions.",
+                        steps_used, max_steps, reward=-0.03
+                    )
                 if action_type == "submit_answer":
                     return handler(params, steps_used)
                 return handler(params, steps_used, max_steps)
 
             # Unknown action — penalise (but still above floor)
             return TDSObservation(
-                done=False, reward=_R_MIN,
+                done=False, reward=_R_PENALTY_INVALID,
                 invoice_text=self._invoice_text(),
                 action_result=(
                     f"Unknown action_type: '{action_type}'. "
@@ -168,7 +201,7 @@ class LegaloomEnvironment(Environment):
             )
         except Exception as exc:
             return TDSObservation(
-                done=False, reward=_R_MIN,
+                done=False, reward=-0.02,
                 invoice_text=self._invoice_text() if self._task else "",
                 action_result=f"Environment error: {exc}. Please retry your action.",
                 available_actions=self._available_actions() if self._task else ["read_invoice"],
@@ -190,7 +223,7 @@ class LegaloomEnvironment(Environment):
         if not gt["pan_valid"]:
             guidance += " IMPORTANT: Always verify PAN status before computing TDS."
         return TDSObservation(
-            done=False, reward=_R_MIN,
+            done=False, reward=_R_POSITIVE_BASE,
             invoice_text=self._task["invoice_text"],
             action_result=f"Invoice retrieved. {guidance}",
             available_actions=self._available_actions(),
@@ -207,6 +240,7 @@ class LegaloomEnvironment(Environment):
             )
 
         reward = self._award("pan_checked")
+        self._pan_checked_pan = pan
         self._state.pan_checked = True
 
         try:
@@ -232,7 +266,7 @@ class LegaloomEnvironment(Environment):
 
         gt = self._task["ground_truth"]
         if not gt["pan_valid"] and "INOPERATIVE" in result.upper():
-            reward = _r(reward + self._award("pan_inoperative_flagged"))
+            reward = _step_reward(reward + self._award("pan_inoperative_flagged"))
 
         return TDSObservation(
             done=False, reward=reward,
@@ -260,6 +294,7 @@ class LegaloomEnvironment(Environment):
             )
 
         crossed = threshold_crossed(section, amount, ytd)
+        self._threshold_checked = True
         s = TDS_SECTIONS[section]
         result = (
             f"Section {section} threshold check — Invoice: INR {amount:,.0f} | "
@@ -294,7 +329,7 @@ class LegaloomEnvironment(Environment):
             vendor_pan = self._task["vendor_pan"]
             if pan == vendor_pan:
                 result = (
-                    f"YTD payments to vendor PAN {pan} in FY 2024-25: "
+                    f"YTD payments to vendor PAN {pan} in FY 2025-26: "
                     f"INR {ytd:,.0f}. "
                     "Add the current invoice amount to determine if annual threshold is crossed."
                 )
@@ -326,6 +361,8 @@ class LegaloomEnvironment(Environment):
         result_dict = classify_service(description, vendor_is_company=is_company_vendor)
         matched_section = result_dict["section"]
         matched_rate    = result_dict["rate"]
+        self._lookup_count += 1
+        self._section_found = matched_section
 
         result = (
             f"Service classification for '{description}': "
@@ -335,7 +372,7 @@ class LegaloomEnvironment(Environment):
             f"Confidence: {result_dict.get('confidence', 'medium')}."
         )
 
-        reward = _R_MIN
+        reward = _R_NEUTRAL
         expected_section = gt["section"]
         tds_applicable = gt.get("tds_applicable", True)
         section_match = (
@@ -345,6 +382,12 @@ class LegaloomEnvironment(Environment):
         if section_match or not tds_applicable:
             reward = self._award("section_correct")
             self._state.section_identified = True
+
+        # Apply tool-cost penalty to prevent overreliance on direct lookup.
+        reward -= (_R_PENALTY_SHORTCUT if self._lookup_count == 1 else 0.03)
+        if self._lookup_count > 3:
+            reward -= 0.05
+        reward = _step_reward(reward)
 
         return TDSObservation(
             done=False, reward=reward,
@@ -358,6 +401,7 @@ class LegaloomEnvironment(Environment):
     def _handle_query_law(self, params, steps_used, max_steps):
         section = str(params.get("section", "")).strip().upper()
         self._law_queried = True
+        self._law_count += 1
 
         if not section or section not in TDS_SECTIONS:
             result = "TDS Sections overview (FY 2025-26):\n"
@@ -388,7 +432,7 @@ class LegaloomEnvironment(Environment):
             )
 
         return TDSObservation(
-            done=False, reward=_R_MIN,
+            done=False, reward=_step_reward(-0.02 * self._law_count),
             invoice_text=self._invoice_text(),
             action_result=result,
             available_actions=self._available_actions(),
@@ -397,6 +441,24 @@ class LegaloomEnvironment(Environment):
         )
 
     def _handle_submit_answer(self, params, steps_used) -> TDSObservation:
+        if not self._state.pan_checked:
+            return self._error_obs(
+                "Workflow violation: check_pan is required before submit_answer.",
+                steps_used, self._task["max_steps"], reward=-0.04
+            )
+        if not self._state.section_identified and not self._law_queried:
+            return self._error_obs(
+                "Workflow violation: identify applicable section before submit_answer.",
+                steps_used, self._task["max_steps"], reward=-0.04
+            )
+        if self._task.get("category") in ("threshold_boundary", "below_threshold_new_limits") and not (
+            self._ytd_queried and self._threshold_checked
+        ):
+            return self._error_obs(
+                "Workflow violation: threshold tasks require query_ytd and check_threshold before submit_answer.",
+                steps_used, self._task["max_steps"], reward=-0.04
+            )
+
         self._state.answer_submitted = True
         gt = self._task["ground_truth"]
 
@@ -413,8 +475,11 @@ class LegaloomEnvironment(Environment):
         if grader_result["breakdown"].get("gst_base_correct"):
             self._award("gst_base_correct")
 
-        # Grader score is already clamped strictly in (0.0, 1.0)
         final_reward = grader_result["score"]
+        if self._law_count > 1:
+            final_reward = max(0.0, final_reward - 0.03 * (self._law_count - 1))
+        if self._lookup_count > 2:
+            final_reward = max(0.0, final_reward - 0.02 * (self._lookup_count - 2))
         self._episode_reward = final_reward
         return self._end_episode(final_reward, fb, steps_used)
 
@@ -440,21 +505,20 @@ class LegaloomEnvironment(Environment):
         )
 
     def _award(self, key: str) -> float:
-        """Award reward for a breakpoint exactly once per episode. Always > 0."""
+        """Award reward for a breakpoint exactly once per episode."""
         if key not in KNOWN_BREAKPOINTS:
             raise KeyError(
                 f"Unknown reward breakpoint key: {key}. "
                 f"Valid keys: {sorted(KNOWN_BREAKPOINTS)}"
             )
         if key not in self._task["reward_breakpoints"]:
-            return _R_MIN
+            return _R_NEUTRAL
         if self._reward_earned[key]:
-            return _R_MIN
-        reward = float(self._task["reward_breakpoints"].get(key, _R_MIN))
-        reward = _r(reward)
+            return _R_PENALTY_REPEAT
+        reward = float(self._task["reward_breakpoints"].get(key, _R_NEUTRAL))
         self._reward_earned[key] = True
-        self._episode_reward = _r(self._episode_reward + reward)
-        return reward
+        self._episode_reward = _step_reward(self._episode_reward + reward)
+        return _step_reward(reward)
 
     def _invoice_text(self) -> str:
         return self._task["invoice_text"] if self._invoice_read else ""
@@ -478,9 +542,9 @@ class LegaloomEnvironment(Environment):
             return "Call query_ytd to check cumulative payments before computing TDS."
         return "Call submit_answer with tds_amount_inr, section, and rate_percent."
 
-    def _error_obs(self, message: str, steps_used: int, max_steps: int) -> TDSObservation:
+    def _error_obs(self, message: str, steps_used: int, max_steps: int, reward: float = -0.02) -> TDSObservation:
         return TDSObservation(
-            done=False, reward=_R_MIN,
+            done=False, reward=_step_reward(reward),
             invoice_text=self._invoice_text(),
             action_result=message,
             available_actions=self._available_actions(),
@@ -490,7 +554,7 @@ class LegaloomEnvironment(Environment):
 
     def _force_close(self, steps_used: int, max_steps: int) -> TDSObservation:
         return TDSObservation(
-            done=True, reward=_R_MIN,
+            done=True, reward=0.0,
             invoice_text=self._invoice_text(),
             action_result=(
                 f"Episode terminated: exceeded {max_steps} steps without submitting. "

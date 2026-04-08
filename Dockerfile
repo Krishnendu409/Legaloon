@@ -9,12 +9,12 @@ RUN apt-get update && \
 COPY . .
 
 RUN pip install --no-cache-dir \
-    openenv-core \
-    fastapi \
-    uvicorn \
-    pydantic \
-    openai \
-    httpx
+    openenv-core==0.2.2 \
+    fastapi==0.135.3 \
+    uvicorn==0.44.0 \
+    pydantic==2.12.5 \
+    openai==2.30.0 \
+    httpx==0.28.1
 
 ENV PYTHONPATH="/app:$PYTHONPATH"
 

@@ -1,18 +1,10 @@
 """
 inference.py — LegaLoom-Env Baseline Inference Script
-
-Mandatory variables:
-    API_BASE_URL     : LLM endpoint
-    MODEL_NAME       : model identifier
-    HF_TOKEN         : Hugging Face API key
-    LOCAL_IMAGE_NAME : Docker image name (optional)
-
-Stdout format (strictly enforced by hackathon spec):
-    [START] task=<task_id> env=legaloom_env model=<model>
-    [STEP]  step=<n> action=<str> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
-
-Reward contract: every reward value is strictly in (0.0, 1.0) exclusive.
+Strict stdout format:
+    [START] ...
+    [STEP] ...
+    [END] ...
+All other diagnostics go to stderr only.
 """
 
 import json
@@ -38,7 +30,7 @@ BENCHMARK   = "legaloom_env"
 MAX_STEPS   = 10
 TEMPERATURE = 0
 MAX_TOKENS  = 300
-GLOBAL_SEED = int(os.getenv("INFERENCE_SEED", "42"))
+GLOBAL_SEED = int(os.getenv("OPENENV_SEED", os.getenv("INFERENCE_SEED", "42")))
 DEFAULT_FALLBACK_PAN = "ABCDE1234F"
 DEFAULT_THRESHOLD_SECTION = "194J"
 DEFAULT_THRESHOLD_AMOUNT = 0.0
@@ -56,21 +48,19 @@ TASK_SEED_OFFSET = {
     "task_expert": 404,
 }
 
-# Reward bounds — strictly open (0.0, 1.0)
-_R_MIN = 0.05
-_R_MAX = 0.95
+_R_MIN = 0.0
 
 
 def _clamp(v: float) -> float:
-    return round(min(max(float(v), _R_MIN), _R_MAX), 4)
+    return round(float(v), 4)
 
 
 # ---------------------------------------------------------------------------
 # Mandatory stdout loggers — exact spec format
 # ---------------------------------------------------------------------------
 
-def log_start(task: str, env: str, model: str) -> None:
-    print(f"[START] task={task} env={env} model={model}", flush=True)
+def log_start(task: str, env: str, model: str, seed: int) -> None:
+    print(f"[START] task={task} env={env} model={model} seed={seed}", flush=True)
 
 
 def log_step(step: int, action: str, reward: float,
@@ -78,7 +68,6 @@ def log_step(step: int, action: str, reward: float,
     error_val    = error if error else "null"
     done_val     = str(done).lower()
     action_clean = action.replace("\n", " ").replace("\r", "")[:200]
-    # Reward must be strictly in (0.0, 1.0) — clamp here as final safety net
     logged_reward = _clamp(reward)
     print(
         f"[STEP] step={step} action={action_clean} "
@@ -88,17 +77,13 @@ def log_step(step: int, action: str, reward: float,
 
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    # Clamp all individual rewards — evaluator checks each one
     safe_rewards = [_clamp(r) for r in rewards]
     rewards_str  = ",".join(f"{r:.2f}" for r in safe_rewards)
     success_val  = "true" if success else "false"
-    # Clamp the overall score too
-    safe_score   = _clamp(score)
     print(
         f"[END] success={success_val} steps={steps} rewards={rewards_str}",
         flush=True,
     )
-    print(f"[SCORE] {safe_score:.3f}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -302,12 +287,12 @@ def get_agent_action(client: Optional[OpenAI], step: int, obs: dict,
         return json.loads(raw)
 
     except json.JSONDecodeError as e:
-        print(f"[DEBUG] JSON parse error at step {step}: {e}", flush=True)
+        print(f"[DEBUG] JSON parse error at step {step}: {e}", file=sys.stderr, flush=True)
         return {"action_type": "submit_answer",
                 "parameters": {"tds_amount_inr": 0.0, "section": "194J",
                                 "rate_percent": 0.0, "no_tds": "true"}}
     except Exception as e:
-        print(f"[DEBUG] LLM call failed at step {step}: {e}", flush=True)
+        print(f"[DEBUG] LLM call failed at step {step}: {e}", file=sys.stderr, flush=True)
         return {"action_type": "submit_answer",
                 "parameters": {"tds_amount_inr": 0.0, "section": "194J",
                                 "rate_percent": 0.0, "no_tds": "true"}}
@@ -328,7 +313,7 @@ def run_episode(client: Optional[OpenAI], env, task_id: str) -> dict:
     final_reward = None
     episode_seed = GLOBAL_SEED + TASK_SEED_OFFSET.get(task_id, 0)
 
-    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME, seed=episode_seed)
 
     try:
         if _reset_supports_seed(env):
@@ -377,7 +362,6 @@ def run_episode(client: Optional[OpenAI], env, task_id: str) -> dict:
                 done   = False
                 error  = str(e)[:120]
 
-            # Every per-step reward must be strictly in (0.0, 1.0)
             reward = _clamp(reward)
             rewards.append(reward)
             steps_taken = step
@@ -400,6 +384,7 @@ def run_episode(client: Optional[OpenAI], env, task_id: str) -> dict:
         elif rewards:
             print(
                 f"[DEBUG] Terminal reward missing for {task_id}; using average step reward fallback.",
+                file=sys.stderr,
                 flush=True,
             )
             score = _clamp(sum(rewards) / len(rewards))
@@ -409,7 +394,7 @@ def run_episode(client: Optional[OpenAI], env, task_id: str) -> dict:
         success = score >= 0.5
 
     except Exception as e:
-        print(f"[DEBUG] Episode error for {task_id}: {e}", flush=True)
+        print(f"[DEBUG] Episode error for {task_id}: {e}", file=sys.stderr, flush=True)
         score = _R_MIN
 
     finally:
@@ -435,7 +420,6 @@ def main() -> None:
     results  = []
 
     if LOCAL_IMAGE_NAME:
-        print(f"[INFO] Docker mode: {LOCAL_IMAGE_NAME}", file=sys.stderr)
         from client import LegaloomEnv
         env_url = os.getenv("ENV_BASE_URL", "http://localhost:7860")
         for task_id in task_ids:
@@ -459,19 +443,7 @@ def main() -> None:
             result = run_episode(client, LocalEnvWrapper(env), task_id)
             results.append(result)
 
-    print("\n[SUMMARY]", file=sys.stderr)
-    for r in results:
-        print(
-            f"  {r['task_id']}: score={r['score']:.3f} "
-            f"success={r['success']} steps={r['steps']}",
-            file=sys.stderr,
-        )
-    avg = sum(r["score"] for r in results) / len(results)
-    if (avg>=0.5):
-        final_output=1
-    else:
-        final_output=0
-    print(f"  Average score: {final_output}", file=sys.stderr)
+    _ = results
 
 
 if __name__ == "__main__":
