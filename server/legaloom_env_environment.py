@@ -10,6 +10,7 @@ The hackathon validator rejects exactly 0.0 and exactly 1.0.
 
 from uuid import uuid4
 import os
+import random
 
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
@@ -84,7 +85,8 @@ class LegaloomEnvironment(Environment):
         self._threshold_checked = False
         self._lookup_count = 0
         self._law_count = 0
-        self._default_seed = int(os.getenv("OPENENV_SEED", "42"))
+        seed_from_env = os.getenv("OPENENV_SEED")
+        self._default_seed = int(seed_from_env) if seed_from_env is not None else None
         self._episode_seed = None
 
     # ------------------------------------------------------------------
@@ -96,7 +98,10 @@ class LegaloomEnvironment(Environment):
             task_id = "task_easy"
 
         if seed is None:
-            seed = self._default_seed
+            if self._default_seed is not None:
+                seed = self._default_seed
+            else:
+                seed = random.SystemRandom().randint(1, 2_147_483_647)
         self._episode_seed = int(seed)
 
         self._task            = sample_task(task_id, seed=self._episode_seed)
@@ -239,7 +244,11 @@ class LegaloomEnvironment(Environment):
                 steps_used, max_steps
             )
 
-        reward = self._award("pan_checked")
+        vendor_pan = self._task["vendor_pan"]
+        if pan == vendor_pan:
+            reward = self._award("pan_checked")
+        else:
+            reward = _R_PENALTY_REPEAT
         self._pan_checked_pan = pan
         self._state.pan_checked = True
 
@@ -252,7 +261,6 @@ class LegaloomEnvironment(Environment):
             result = pan_status_message(pan)
         else:
             gt = self._task["ground_truth"]
-            vendor_pan = self._task["vendor_pan"]
             if pan == vendor_pan:
                 if gt["pan_valid"]:
                     result = f"PAN {pan} is operative and valid. TDS at section rate applies."
@@ -265,7 +273,7 @@ class LegaloomEnvironment(Environment):
                 result = f"PAN {pan} not found in registry. Verify the PAN from the invoice."
 
         gt = self._task["ground_truth"]
-        if not gt["pan_valid"] and "INOPERATIVE" in result.upper():
+        if pan == vendor_pan and not gt["pan_valid"] and "INOPERATIVE" in result.upper():
             reward = _step_reward(reward + self._award("pan_inoperative_flagged"))
 
         return TDSObservation(
@@ -304,7 +312,19 @@ class LegaloomEnvironment(Environment):
             f"Result: {'TDS IS applicable — threshold crossed.' if crossed else 'TDS NOT applicable — below threshold.'}"
         )
 
-        reward = self._award("threshold_checked")
+        gt = self._task["ground_truth"]
+        expected_section = str(gt.get("section", "")).upper()
+        split_allowed_sections = {
+            "SPLIT": {"194J", "194C"},
+            "SPLIT_194J_194I": {"194J", "194I"},
+        }
+        section_relevant = (
+            section == expected_section
+            or section in split_allowed_sections.get(expected_section, set())
+        )
+        expected_amount = float(gt.get("taxable_amount", amount))
+        amount_relevant = abs(float(amount) - expected_amount) <= max(AMOUNT_TOLERANCE_INR, expected_amount * 0.02)
+        reward = self._award("threshold_checked") if (section_relevant and amount_relevant) else _R_NEUTRAL
         return TDSObservation(
             done=False, reward=reward,
             invoice_text=self._invoice_text(),
@@ -336,7 +356,8 @@ class LegaloomEnvironment(Environment):
             else:
                 result = f"No payment history found for PAN {pan} in current financial year."
 
-        reward = self._award("query_ytd_checked")
+        vendor_pan = self._task["vendor_pan"]
+        reward = self._award("query_ytd_checked") if (not pan or pan == vendor_pan) else _R_NEUTRAL
         return TDSObservation(
             done=False, reward=reward,
             invoice_text=self._invoice_text(),
@@ -363,6 +384,7 @@ class LegaloomEnvironment(Environment):
         matched_rate    = result_dict["rate"]
         self._lookup_count += 1
         self._section_found = matched_section
+        self._state.section_identified = True
 
         result = (
             f"Service classification for '{description}': "
@@ -375,13 +397,16 @@ class LegaloomEnvironment(Environment):
         reward = _R_NEUTRAL
         expected_section = gt["section"]
         tds_applicable = gt.get("tds_applicable", True)
+        split_allowed_sections = {
+            "SPLIT": {"194J", "194C"},
+            "SPLIT_194J_194I": {"194J", "194I"},
+        }
         section_match = (
-            matched_section == expected_section and
-            expected_section not in ("SPLIT", "SPLIT_194J_194I")
+            matched_section == expected_section
+            or matched_section in split_allowed_sections.get(expected_section, set())
         )
         if section_match or not tds_applicable:
             reward = self._award("section_correct")
-            self._state.section_identified = True
 
         # Apply tool-cost penalty to prevent overreliance on direct lookup.
         reward -= (_R_PENALTY_SHORTCUT if self._lookup_count == 1 else 0.03)
@@ -446,16 +471,18 @@ class LegaloomEnvironment(Environment):
                 "Workflow violation: check_pan is required before submit_answer.",
                 steps_used, self._task["max_steps"], reward=-0.04
             )
-        if not self._state.section_identified and not self._law_queried:
+        min_reasoning_steps = min(3, self._task["max_steps"])
+        has_reasoning_evidence = self._state.section_identified or self._law_queried
+        if not has_reasoning_evidence and steps_used < min_reasoning_steps:
             return self._error_obs(
-                "Workflow violation: identify applicable section before submit_answer.",
+                "Workflow guard: provide at least minimal reasoning evidence (lookup_section/query_law) or continue a few steps before submit_answer.",
                 steps_used, self._task["max_steps"], reward=-0.04
             )
-        if self._task.get("category") in ("threshold_boundary", "below_threshold_new_limits") and not (
-            self._ytd_queried and self._threshold_checked
-        ):
+        threshold_category = self._task.get("category") in ("threshold_boundary", "below_threshold_new_limits")
+        threshold_evidence_ready = self._ytd_queried and self._threshold_checked
+        if threshold_category and not threshold_evidence_ready and steps_used < (self._task["max_steps"] - 1):
             return self._error_obs(
-                "Workflow violation: threshold tasks require query_ytd and check_threshold before submit_answer.",
+                "Workflow guard: threshold-sensitive tasks should include query_ytd and check_threshold before early submit.",
                 steps_used, self._task["max_steps"], reward=-0.04
             )
 
@@ -565,8 +592,13 @@ class LegaloomEnvironment(Environment):
             hint="",
         )
 
-    @property
     def state(self) -> TDSState:
+        """OpenEnv callable state API."""
+        return self._state
+
+    @property
+    def current_state(self) -> TDSState:
+        """Backward-compatible state accessor."""
         return self._state
 
     def get_state(self) -> TDSState:

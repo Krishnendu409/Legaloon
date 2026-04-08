@@ -2,12 +2,6 @@
 FastAPI server for LegaLoom-Env.
 """
 
-import sys
-import os
-
-# Ensure /app is on the path so absolute imports work
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 try:
     from openenv.core.env_server.http_server import create_app
 except Exception as e:

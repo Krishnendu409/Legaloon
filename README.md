@@ -263,8 +263,8 @@ pip install openenv-core openai
 ### Run locally
 
 ```bash
-git clone https://github.com/aaravgupta0202/legaloom_env.git
-cd legaloom_env
+git clone https://github.com/Krishnendu409/Legaloon.git
+cd Legaloon
 pip install openenv-core fastapi uvicorn pydantic openai
 uvicorn server.app:app --host 0.0.0.0 --port 7860
 ```
@@ -316,7 +316,7 @@ Any diagnostics are emitted to stderr only.
 ## Project Structure
 
 ```
-legaloom_env/
+Legaloon/
 ├── inference.py                     ← Baseline inference script (all 4 tasks)
 ├── models.py                        ← TDSAction, TDSObservation, TDSState
 ├── client.py                        ← LegaloomEnv WebSocket client
@@ -334,8 +334,8 @@ legaloom_env/
 
 ---
 
-## Live Endpoint
+## Ownership & Provenance
 
-**HF Space:** https://huggingface.co/spaces/aarav0202/legaloom-env
-
-**API base:** https://aarav0202-legaloom-env.hf.space
+- Canonical repository: `Krishnendu409/Legaloon`
+- Environment package/app in this repository is the authoritative source for this submission.
+- If deployed to Hugging Face Spaces, set `API_BASE_URL`/Space URL from your own deployment outputs.
