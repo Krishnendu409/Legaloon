@@ -250,6 +250,16 @@ def _build_breakpoints(difficulty: str, invoice: dict) -> dict:
 
 
 def _required_evidence_actions(category: str, task_id: str) -> list[str]:
+    """
+    Return the ordered evidence actions expected for a scenario.
+
+    Args:
+        category: Invoice category used for the sampled task.
+        task_id: Current task identifier (easy/medium/hard/expert).
+
+    Returns:
+        Ordered de-duplicated action_type list used by submit-time reasoning checks.
+    """
     base = ["check_pan"]
     if category in {"mixed_invoice", "gst_bundled_tds_base"}:
         base.append("lookup_section")

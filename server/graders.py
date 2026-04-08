@@ -19,6 +19,14 @@ GST_BUNDLED_INDICATORS = (
 PENALTY_SECTION_RATE_MISMATCH = 0.08
 PENALTY_INOP_PAN_MISSED = 0.08
 PENALTY_REASONING_SHORTCUT = 0.05
+SPLIT_ALLOWED_SECTIONS = {
+    "SPLIT": {"194J", "194C", "SPLIT"},
+    "SPLIT_194J_194I": {"194J", "194I", "SPLIT_194J_194I"},
+}
+SPLIT_COMPONENT_RATES = {
+    "SPLIT": {2.0, 10.0},
+    "SPLIT_194J_194I": {2.0, 10.0},
+}
 
 
 def grade_submission(
@@ -71,13 +79,13 @@ def grade_submission(
         else:
             W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.0, 0.25, 0.15, 0.0, 0.0, 0.60
     elif task_id == "task_expert":
-        W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.0, 0.35, 0.20, 0.0, 0.10 if gst_bundled_case else 0.0, 0.45 if gst_bundled_case else 0.45
+        W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.0, 0.35, 0.20, 0.0, 0.10 if gst_bundled_case else 0.0, 0.45
     else:  # task_hard
         if is_inop_pan:
             if goods > 0:
                 W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.30, 0.10, 0.15, 0.10, 0.0, 0.35
             else:
-                W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.30, 0.10, 0.15, 0.0, 0.10 if gst_bundled_case else 0.0, 0.45 if gst_bundled_case else 0.45
+                W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.30, 0.10, 0.15, 0.0, 0.10 if gst_bundled_case else 0.0, 0.45
         else:
             if goods > 0:
                 W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.0, 0.20, 0.15, 0.20, 0.0, 0.45
@@ -110,14 +118,9 @@ def grade_submission(
     # Case 3: Section correct
     expected_section = ground_truth["section"]
     split = expected_section in ("SPLIT", "SPLIT_194J_194I")
-    split_allowed_sections = {
-        "SPLIT": {"194J", "194C"},
-        "SPLIT_194J_194I": {"194J", "194I"},
-    }
     section_ok = (
         submitted_section == expected_section or
-        (split and submitted_section in split_allowed_sections.get(expected_section, set()))
-        or (split and submitted_section in {"SPLIT", "SPLIT_194J_194I"})
+        (split and submitted_section in SPLIT_ALLOWED_SECTIONS.get(expected_section, set()))
     )
     breakdown["section_correct"] = section_ok
     if section_ok:
@@ -135,10 +138,7 @@ def grade_submission(
         taxable = float(ground_truth.get("taxable_amount", 0.0))
         if taxable > 0:
             blended_rate = (float(ground_truth.get("tds_amount_inr", 0.0)) * 100.0) / taxable
-        split_component_rates = {
-            "SPLIT": {2.0, 10.0},
-            "SPLIT_194J_194I": {2.0, 10.0},
-        }.get(expected_section, {2.0, 10.0})
+        split_component_rates = SPLIT_COMPONENT_RATES.get(expected_section, {2.0, 10.0})
         rate_ok = (
             abs(submitted_rate - blended_rate) < 0.05
             or abs(submitted_rate - 0.0) < 0.01

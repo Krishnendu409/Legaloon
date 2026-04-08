@@ -16,9 +16,9 @@ from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
 try:
-    from ..models import TDSAction, TDSObservation, TDSState
+    from ..models import TDSAction, TDSObservation, TDSReward, TDSState
 except ImportError:
-    from models import TDSAction, TDSObservation, TDSState
+    from models import TDSAction, TDSObservation, TDSReward, TDSState
 
 try:
     from .tds_rules import (get_rate, threshold_crossed, compute_tds,
@@ -52,6 +52,7 @@ _R_POSITIVE_BASE = 0.02
 _R_NEUTRAL = 0.0
 _R_PENALTY_INVALID = -0.05
 _R_PENALTY_REPEAT = -0.02
+_R_PENALTY_WRONG_PARAM = -0.02
 _R_PENALTY_SHORTCUT = -0.01
 _R_WEAK_REASONING_DEDUCTION = 0.05
 DEFAULT_EPISODE_SEED = 42
@@ -147,7 +148,7 @@ class LegaloomEnvironment(Environment):
             steps_used=0,
             max_steps=self._task["max_steps"],
             hint=self._build_hint(),
-            reward_info=TDSObservation.TDSReward(
+            reward_info=TDSReward(
                 step_reward=_R_NEUTRAL,
                 cumulative_reward=self._episode_reward,
                 final_score=None,
@@ -358,7 +359,7 @@ class LegaloomEnvironment(Environment):
         self._ytd_queried = True
 
         if not pan:
-            result = "query_ytd requires vendor PAN for audited YTD lookup."
+            result = "query_ytd requires a \"pan\" parameter. Please provide a vendor PAN to query YTD payment history."
         else:
             vendor_pan = self._task["vendor_pan"]
             if pan == vendor_pan:
@@ -374,7 +375,7 @@ class LegaloomEnvironment(Environment):
         if not pan:
             reward = -0.01
         else:
-            reward = self._award("query_ytd_checked") if pan == vendor_pan else _R_PENALTY_REPEAT
+            reward = self._award("query_ytd_checked") if pan == vendor_pan else _R_PENALTY_WRONG_PARAM
         return TDSObservation(
             done=False, reward=reward,
             invoice_text=self._invoice_text(),
@@ -560,7 +561,7 @@ class LegaloomEnvironment(Environment):
             steps_used=steps_used,
             max_steps=self._task["max_steps"],
             hint="",
-            reward_info=TDSObservation.TDSReward(
+            reward_info=TDSReward(
                 step_reward=total_score,
                 cumulative_reward=total_score,
                 final_score=total_score,
@@ -617,7 +618,7 @@ class LegaloomEnvironment(Environment):
             available_actions=self._available_actions(),
             steps_used=steps_used, max_steps=max_steps,
             hint=self._build_hint(),
-            reward_info=TDSObservation.TDSReward(
+            reward_info=TDSReward(
                 step_reward=reward_value,
                 cumulative_reward=self._episode_reward,
                 final_score=None,
@@ -637,7 +638,7 @@ class LegaloomEnvironment(Environment):
             available_actions=[],
             steps_used=steps_used, max_steps=max_steps,
             hint="",
-            reward_info=TDSObservation.TDSReward(
+            reward_info=TDSReward(
                 step_reward=score,
                 cumulative_reward=score,
                 final_score=score,
