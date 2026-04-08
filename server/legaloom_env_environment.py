@@ -53,7 +53,16 @@ class LegaloomEnvironment(Environment):
         self._invoice_read    = False
         self._ytd_queried     = False
         self._law_queried     = False
-        self._reward_earned   = {}
+        self._reward_earned   = {
+            "pan_checked": False,
+            "pan_inoperative_flagged": False,
+            "section_correct": False,
+            "threshold_checked": False,
+            "query_ytd_checked": False,
+            "goods_excluded": False,
+            "gst_base_correct": False,
+            "amount_exact": False,
+        }
         self._episode_reward  = _R_MIN
         self._current_task_id = "task_easy"
         self._pan_checked_pan = None
@@ -74,7 +83,16 @@ class LegaloomEnvironment(Environment):
         self._law_queried     = False
         self._pan_checked_pan = None
         self._section_found   = None
-        self._reward_earned   = {k: False for k in self._task["reward_breakpoints"]}
+        self._reward_earned   = {
+            "pan_checked": False,
+            "pan_inoperative_flagged": False,
+            "section_correct": False,
+            "threshold_checked": False,
+            "query_ytd_checked": False,
+            "goods_excluded": False,
+            "gst_base_correct": False,
+            "amount_exact": False,
+        }
         self._episode_reward  = _R_MIN   # start just above 0.0
 
         self._state = TDSState(
@@ -287,7 +305,7 @@ class LegaloomEnvironment(Environment):
             else:
                 result = f"No payment history found for PAN {pan} in current financial year."
 
-        reward = self._award("threshold_checked")
+        reward = self._award("query_ytd_checked")
         return TDSObservation(
             done=False, reward=reward,
             invoice_text=self._invoice_text(),
@@ -427,7 +445,9 @@ class LegaloomEnvironment(Environment):
 
     def _award(self, key: str) -> float:
         """Award reward for a breakpoint exactly once per episode. Always > 0."""
-        if self._reward_earned.get(key, True):
+        if key not in self._task["reward_breakpoints"]:
+            return _R_MIN
+        if self._reward_earned.get(key, False):
             return _R_MIN
         reward = float(self._task["reward_breakpoints"].get(key, _R_MIN))
         reward = _r(reward)

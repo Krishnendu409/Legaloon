@@ -17,6 +17,7 @@ Reward contract: every reward value is strictly in (0.0, 1.0) exclusive.
 
 import json
 import os
+import re
 import sys
 import textwrap
 from typing import List, Optional
@@ -36,6 +37,13 @@ BENCHMARK   = "legaloom_env"
 MAX_STEPS   = 10
 TEMPERATURE = 0
 MAX_TOKENS  = 300
+GLOBAL_SEED = int(os.getenv("INFERENCE_SEED", "42"))
+TASK_SEED_OFFSET = {
+    "task_easy": 101,
+    "task_medium": 202,
+    "task_hard": 303,
+    "task_expert": 404,
+}
 
 # Reward bounds — strictly open (0.0, 1.0)
 _R_MIN = 0.05
@@ -190,15 +198,59 @@ Previous steps:
 {history_block}
 
 Output your next action as a JSON object only.
-""").strip()
+    """).strip()
+
+
+def _extract_pan(invoice_text: str) -> Optional[str]:
+    match = re.search(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", invoice_text.upper())
+    return match.group(0) if match else None
+
+
+def _extract_description(invoice_text: str) -> str:
+    lines = [ln.strip() for ln in invoice_text.splitlines() if ln.strip()]
+    for line in lines:
+        low = line.lower()
+        if any(k in low for k in ("service", "description", "particular", "item")):
+            return line
+    return lines[0] if lines else "professional services"
+
+
+def _fallback_action(obs: dict, history: List[str]) -> dict:
+    available = set(obs.get("available_actions") or [])
+    invoice = obs.get("invoice_text", "")
+    history_text = " ".join(history).lower()
+
+    if "read_invoice" in available and not invoice:
+        return {"action_type": "read_invoice", "parameters": {}}
+
+    pan = _extract_pan(invoice) or "ABCDE1234F"
+    if "check_pan" in available and "check_pan(" not in history_text:
+        return {"action_type": "check_pan", "parameters": {"pan": pan}}
+
+    if "lookup_section" in available and "lookup_section(" not in history_text:
+        return {"action_type": "lookup_section", "parameters": {"description": _extract_description(invoice)}}
+
+    if "query_ytd" in available and "query_ytd(" not in history_text:
+        return {"action_type": "query_ytd", "parameters": {"pan": pan}}
+
+    if "check_threshold" in available and "check_threshold(" not in history_text:
+        return {"action_type": "check_threshold", "parameters": {"section": "194J", "amount": 0}}
+
+    return {
+        "action_type": "submit_answer",
+        "parameters": {"tds_amount_inr": 0.0, "section": "194J", "rate_percent": 0.0, "no_tds": "true"},
+    }
 
 
 # ---------------------------------------------------------------------------
 # Call LLM and parse JSON action
 # ---------------------------------------------------------------------------
 
-def get_agent_action(client: OpenAI, step: int, obs: dict,
-                     history: List[str]) -> dict:
+def get_agent_action(client: Optional[OpenAI], step: int, obs: dict,
+                     history: List[str], seed: int) -> dict:
+    if client is None:
+        return _fallback_action(obs, history)
+
     user_prompt = build_user_prompt(step, obs, history)
     try:
         completion = client.chat.completions.create(
@@ -208,6 +260,7 @@ def get_agent_action(client: OpenAI, step: int, obs: dict,
                 {"role": "user",   "content": user_prompt},
             ],
             temperature=TEMPERATURE,
+            seed=seed,
             max_tokens=MAX_TOKENS,
             stream=False,
         )
@@ -238,7 +291,7 @@ def get_agent_action(client: OpenAI, step: int, obs: dict,
 # Run one full episode
 # ---------------------------------------------------------------------------
 
-def run_episode(client: OpenAI, env, task_id: str) -> dict:
+def run_episode(client: Optional[OpenAI], env, task_id: str) -> dict:
     from models import TDSAction
 
     rewards: List[float] = []
@@ -246,11 +299,13 @@ def run_episode(client: OpenAI, env, task_id: str) -> dict:
     steps_taken = 0
     success     = False
     score       = _R_MIN
+    final_reward = None
+    episode_seed = GLOBAL_SEED + TASK_SEED_OFFSET.get(task_id, 0)
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        result = env.reset(task_id=task_id)
+        result = env.reset(task_id=task_id, seed=episode_seed)
 
         if hasattr(result, "observation"):
             obs  = result.observation.__dict__ if hasattr(result.observation, "__dict__") else {}
@@ -263,7 +318,7 @@ def run_episode(client: OpenAI, env, task_id: str) -> dict:
             if done:
                 break
 
-            action_dict = get_agent_action(client, step, obs, history)
+            action_dict = get_agent_action(client, step, obs, history, episode_seed + step)
             action_type = action_dict.get("action_type", "read_invoice")
             parameters  = action_dict.get("parameters", {})
 
@@ -307,15 +362,14 @@ def run_episode(client: OpenAI, env, task_id: str) -> dict:
             )
 
             if done:
+                final_reward = reward
                 break
 
-        # Final score: use the last reward from done=True step (the grader score)
-        # That reward is already clamped by the environment.
-        # Fallback: average of all step rewards.
-        if rewards:
-            # The final reward (done=True) is the authoritative grader score
-            last_reward = rewards[-1]
-            score = _clamp(last_reward)
+        # Final score: use reward observed on terminal transition.
+        if final_reward is not None:
+            score = _clamp(final_reward)
+        elif rewards:
+            score = _clamp(sum(rewards) / len(rewards))
         else:
             score = _R_MIN
 
@@ -341,7 +395,9 @@ def run_episode(client: OpenAI, env, task_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    client   = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    client = None
+    if API_KEY:
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     task_ids = ["task_easy", "task_medium", "task_hard", "task_expert"]
     results  = []
 
@@ -363,7 +419,7 @@ def main() -> None:
             class LocalEnvWrapper:
                 def __init__(self, e): self._env = e
                 def reset(self, task_id="task_easy", **kw):
-                    return self._env.reset(task_id=task_id)
+                    return self._env.reset(task_id=task_id, **kw)
                 def step(self, action):
                     return self._env.step(action)
 
