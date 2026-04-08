@@ -18,6 +18,7 @@ GST_BUNDLED_INDICATORS = (
 )
 PENALTY_SECTION_RATE_MISMATCH = 0.10
 PENALTY_INOP_PAN_MISSED = 0.10
+PENALTY_REASONING_SHORTCUT = 0.08
 
 # Strict bounds — never touch 0.0 or 1.0
 _SCORE_MIN = 0.05   # minimum meaningful score (not zero)
@@ -209,6 +210,19 @@ def grade_submission(
         score = max(0.0, score - PENALTY_SECTION_RATE_MISMATCH)
     if is_inop_pan and not breakdown.get("pan_inoperative_detected", False):
         score = max(0.0, score - PENALTY_INOP_PAN_MISSED)
+
+    reasoning_shortcut_suspected = (
+        amount_ok and (not section_ok or not rate_ok)
+    ) or (
+        submitted_section == ""
+        and submitted_amount >= 0.0
+        and not no_tds_flag
+        and ground_truth.get("tds_applicable", True)
+    )
+    breakdown["reasoning_shortcut_suspected"] = reasoning_shortcut_suspected
+    if reasoning_shortcut_suspected:
+        score = max(0.0, score - PENALTY_REASONING_SHORTCUT)
+        feedback.append("Answer appears under-justified: amount may be guessed without coherent section/rate reasoning.")
 
     correct = (
         amount_ok

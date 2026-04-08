@@ -51,6 +51,8 @@ _R_NEUTRAL = 0.0
 _R_PENALTY_INVALID = -0.05
 _R_PENALTY_REPEAT = -0.02
 _R_PENALTY_SHORTCUT = -0.01
+_R_WEAK_REASONING_DEDUCTION = 0.05
+_MIN_SUBMIT_SCORE = 0.05
 
 # Final scorer bounds
 _FINAL_MIN = 0.0
@@ -227,6 +229,9 @@ class LegaloomEnvironment(Environment):
             guidance += " This invoice has multiple line items — check each carefully."
         if not gt["pan_valid"]:
             guidance += " IMPORTANT: Always verify PAN status before computing TDS."
+        scenario = self._task.get("scenario_noise", {})
+        if scenario.get("conflicting_signal"):
+            guidance += " The invoice includes a non-authoritative memo that may conflict with true tax treatment."
         return TDSObservation(
             done=False, reward=_R_POSITIVE_BASE,
             invoice_text=self._task["invoice_text"],
@@ -271,7 +276,10 @@ class LegaloomEnvironment(Environment):
                         "TDS rate: 20% regardless of section — Section 206AA applies."
                     )
             else:
-                result = f"PAN {pan} not found in registry. Verify the PAN from the invoice."
+                result = (
+                    f"PAN {pan} not found in registry. Verify the PAN from the invoice. "
+                    "Non-invoice PAN probes do not earn reward."
+                )
 
         gt = self._task["ground_truth"]
         if pan == vendor_pan and not gt["pan_valid"] and "INOPERATIVE" in result.upper():
@@ -492,7 +500,7 @@ class LegaloomEnvironment(Environment):
         gt = self._task["ground_truth"]
 
         grader_result = grade_submission(params, gt, task_id=self._current_task_id)
-        fb = grader_result["feedback"]
+        fb = list(grader_result["feedback"])
 
         if grader_result["breakdown"].get("no_tds_correct") or \
                 grader_result["breakdown"].get("amount_correct"):
@@ -505,6 +513,27 @@ class LegaloomEnvironment(Environment):
             self._award("gst_base_correct")
 
         final_reward = grader_result["score"]
+        scenario = self._task.get("scenario_noise", {})
+        reasoning_evidence_count = sum([
+            bool(self._state.section_identified),
+            bool(self._ytd_queried),
+            bool(self._threshold_checked),
+            bool(self._law_queried),
+        ])
+        required_evidence = 1
+        if scenario.get("requires_multi_step"):
+            required_evidence = 2 if self._current_task_id in ("task_medium", "task_hard") else 3
+        if reasoning_evidence_count < required_evidence:
+            final_reward = max(_MIN_SUBMIT_SCORE, final_reward - _R_WEAK_REASONING_DEDUCTION)
+            fb.append(
+                f"Reasoning depth penalty: provided {reasoning_evidence_count} evidence action(s), expected at least {required_evidence} for this scenario."
+            )
+        if scenario.get("conflicting_signal") and not self._law_queried:
+            final_reward = max(_MIN_SUBMIT_SCORE, final_reward - _R_WEAK_REASONING_DEDUCTION)
+            fb.append("Conflicting memo present: querying statutory section details would improve robustness.")
+        if grader_result["breakdown"].get("reasoning_shortcut_suspected"):
+            final_reward = max(_MIN_SUBMIT_SCORE, final_reward - _R_WEAK_REASONING_DEDUCTION)
+            fb.append("Shortcut detection: answer pattern suggests weak reasoning trace.")
         if self._law_count > 1:
             final_reward = max(0.0, final_reward - 0.03 * (self._law_count - 1))
         if self._lookup_count > 2:
@@ -567,6 +596,8 @@ class LegaloomEnvironment(Environment):
             return "Call check_pan with the vendor PAN from the invoice."
         if not self._state.section_identified:
             return "Call lookup_section with the service description."
+        if self._task and self._task.get("scenario_noise", {}).get("conflicting_signal") and not self._law_queried:
+            return "Conflicting memo detected; consider query_law to validate section logic."
         if self._ytd_queried is False and self._task.get("cumulative_ytd", 0) > 0:
             return "Call query_ytd to check cumulative payments before computing TDS."
         return "Call submit_answer with tds_amount_inr, section, and rate_percent."
@@ -600,7 +631,7 @@ class LegaloomEnvironment(Environment):
 
     @property
     def current_state(self) -> TDSState:
-        """Backward-compatible state accessor."""
+        """Backward-compatible state accessor (kept for older clients)."""
         return self._state
 
     def get_state(self) -> TDSState:
