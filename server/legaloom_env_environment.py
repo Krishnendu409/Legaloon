@@ -248,6 +248,7 @@ class LegaloomEnvironment(Environment):
         if pan == vendor_pan:
             reward = self._award("pan_checked")
         else:
+            # Penalize repeated/irrelevant probe behavior for non-invoice PAN values.
             reward = _R_PENALTY_REPEAT
         self._pan_checked_pan = pan
         self._state.pan_checked = True
@@ -324,7 +325,8 @@ class LegaloomEnvironment(Environment):
         )
         expected_amount = float(gt.get("taxable_amount", amount))
         amount_relevant = abs(float(amount) - expected_amount) <= max(AMOUNT_TOLERANCE_INR, expected_amount * 0.02)
-        reward = self._award("threshold_checked") if (section_relevant and amount_relevant) else _R_NEUTRAL
+        inputs_relevant = section_relevant and amount_relevant
+        reward = self._award("threshold_checked") if inputs_relevant else _R_NEUTRAL
         return TDSObservation(
             done=False, reward=reward,
             invoice_text=self._invoice_text(),
@@ -475,14 +477,14 @@ class LegaloomEnvironment(Environment):
         has_reasoning_evidence = self._state.section_identified or self._law_queried
         if not has_reasoning_evidence and steps_used < min_reasoning_steps:
             return self._error_obs(
-                "Workflow guard: provide at least minimal reasoning evidence (lookup_section/query_law) or continue a few steps before submit_answer.",
+                "Workflow guard: provide reasoning evidence before submitting early in the episode.",
                 steps_used, self._task["max_steps"], reward=-0.04
             )
         threshold_category = self._task.get("category") in ("threshold_boundary", "below_threshold_new_limits")
         threshold_evidence_ready = self._ytd_queried and self._threshold_checked
         if threshold_category and not threshold_evidence_ready and steps_used < (self._task["max_steps"] - 1):
             return self._error_obs(
-                "Workflow guard: threshold-sensitive tasks should include query_ytd and check_threshold before early submit.",
+                "Workflow guard: for threshold-boundary tasks, check YTD and threshold status before early submit.",
                 steps_used, self._task["max_steps"], reward=-0.04
             )
 

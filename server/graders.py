@@ -10,6 +10,14 @@ These functions are deterministic — same inputs always give same output.
 from typing import Dict, Any
 
 AMOUNT_TOLERANCE_INR = 1.0
+GST_BUNDLED_INDICATORS = (
+    "inclusive of all taxes",
+    "gst included in invoice value",
+    "gst bundled",
+    "gst not shown separately",
+)
+PENALTY_SECTION_RATE_MISMATCH = 0.10
+PENALTY_INOP_PAN_MISSED = 0.10
 
 # Strict bounds — never touch 0.0 or 1.0
 _SCORE_MIN = 0.05   # minimum meaningful score (not zero)
@@ -42,7 +50,7 @@ def grade_submission(
     # Case 1: No TDS applicable
     if not ground_truth["tds_applicable"]:
         correct = (submitted_amount == 0.0 and no_tds_flag)
-        # 0.85 for correct, 0.10 for wrong — both strictly inside (0, 1)
+        # Keep non-zero floor per existing score-range contract, while strongly penalizing wrong no-TDS submissions.
         raw_score = 0.85 if correct else 0.05
         feedback.append(
             "Correctly identified: no TDS applicable (below threshold)."
@@ -160,12 +168,7 @@ def grade_submission(
     # Case 5b: GST-bundled base correctness (if applicable)
     note_text = str(ground_truth.get("note", "")).lower()
     gst_bundled_case = any(
-        token in note_text for token in (
-            "inclusive of all taxes",
-            "gst included in invoice value",
-            "gst bundled",
-            "gst not shown separately",
-        )
+        token in note_text for token in GST_BUNDLED_INDICATORS
     )
     gst_base_ok = False
     if gst_bundled_case and submitted_rate > 0:
@@ -203,9 +206,9 @@ def grade_submission(
     breakdown["no_tds_invalid_for_applicable"] = no_tds_invalid_for_applicable
 
     if not section_ok and not rate_ok:
-        score = max(0.0, score - 0.10)
+        score = max(0.0, score - PENALTY_SECTION_RATE_MISMATCH)
     if is_inop_pan and not breakdown.get("pan_inoperative_detected", False):
-        score = max(0.0, score - 0.10)
+        score = max(0.0, score - PENALTY_INOP_PAN_MISSED)
 
     correct = (
         amount_ok
