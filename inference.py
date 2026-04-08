@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import textwrap
+import inspect
 from typing import List, Optional
 
 from openai import OpenAI
@@ -38,6 +39,16 @@ MAX_STEPS   = 10
 TEMPERATURE = 0
 MAX_TOKENS  = 300
 GLOBAL_SEED = int(os.getenv("INFERENCE_SEED", "42"))
+DEFAULT_FALLBACK_PAN = "ABCDE1234F"
+DEFAULT_THRESHOLD_SECTION = "194J"
+DEFAULT_THRESHOLD_AMOUNT = 0.0
+PAN_PATTERN = re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b")
+DEFAULT_SUBMIT_PARAMS = {
+    "tds_amount_inr": 0.0,
+    "section": DEFAULT_THRESHOLD_SECTION,
+    "rate_percent": 0.0,
+    "no_tds": "true",
+}
 TASK_SEED_OFFSET = {
     "task_easy": 101,
     "task_medium": 202,
@@ -202,7 +213,8 @@ Output your next action as a JSON object only.
 
 
 def _extract_pan(invoice_text: str) -> Optional[str]:
-    match = re.search(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", invoice_text.upper())
+    # Simplified extractor for fallback-policy use; this is not full PAN validation.
+    match = PAN_PATTERN.search(invoice_text.upper())
     return match.group(0) if match else None
 
 
@@ -223,7 +235,7 @@ def _fallback_action(obs: dict, history: List[str]) -> dict:
     if "read_invoice" in available and not invoice:
         return {"action_type": "read_invoice", "parameters": {}}
 
-    pan = _extract_pan(invoice) or "ABCDE1234F"
+    pan = _extract_pan(invoice) or DEFAULT_FALLBACK_PAN
     if "check_pan" in available and "check_pan(" not in history_text:
         return {"action_type": "check_pan", "parameters": {"pan": pan}}
 
@@ -234,12 +246,26 @@ def _fallback_action(obs: dict, history: List[str]) -> dict:
         return {"action_type": "query_ytd", "parameters": {"pan": pan}}
 
     if "check_threshold" in available and "check_threshold(" not in history_text:
-        return {"action_type": "check_threshold", "parameters": {"section": "194J", "amount": 0}}
+        return {
+            "action_type": "check_threshold",
+            "parameters": {"section": DEFAULT_THRESHOLD_SECTION, "amount": DEFAULT_THRESHOLD_AMOUNT},
+        }
 
     return {
         "action_type": "submit_answer",
-        "parameters": {"tds_amount_inr": 0.0, "section": "194J", "rate_percent": 0.0, "no_tds": "true"},
+        "parameters": DEFAULT_SUBMIT_PARAMS,
     }
+
+
+def _reset_supports_seed(env) -> bool:
+    try:
+        sig = inspect.signature(env.reset)
+    except (TypeError, ValueError):
+        return False
+    params = sig.parameters
+    if "seed" in params:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +331,10 @@ def run_episode(client: Optional[OpenAI], env, task_id: str) -> dict:
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        result = env.reset(task_id=task_id, seed=episode_seed)
+        if _reset_supports_seed(env):
+            result = env.reset(task_id=task_id, seed=episode_seed)
+        else:
+            result = env.reset(task_id=task_id)
 
         if hasattr(result, "observation"):
             obs  = result.observation.__dict__ if hasattr(result.observation, "__dict__") else {}
@@ -369,6 +398,10 @@ def run_episode(client: Optional[OpenAI], env, task_id: str) -> dict:
         if final_reward is not None:
             score = _clamp(final_reward)
         elif rewards:
+            print(
+                f"[DEBUG] Terminal reward missing for {task_id}; using average step reward fallback.",
+                flush=True,
+            )
             score = _clamp(sum(rewards) / len(rewards))
         else:
             score = _R_MIN

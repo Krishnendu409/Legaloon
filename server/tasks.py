@@ -187,8 +187,8 @@ def _build_breakpoints(difficulty: str, invoice: dict) -> dict:
 
     # Threshold check
     if is_threshold:
-        bp["query_ytd_checked"] = 0.10
-        bp["threshold_checked"] = 0.10
+        bp["query_ytd_checked"] = 0.075
+        bp["threshold_checked"] = 0.075
 
     # GST base
     if is_bundled:
