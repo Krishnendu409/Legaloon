@@ -1,0 +1,67 @@
+spec_version: 1
+name: legaloom_env
+version: "1.0.0"
+description: >
+  TDS (Tax Deducted at Source) compliance environment for Indian financial
+  back-office tasks. Agent analyses vendor invoices and computes the exact
+  TDS deduction in INR across 4 difficulty levels (easy/medium/hard/expert).
+type: space
+runtime: fastapi
+app: server.app:app
+port: 7860
+
+tasks:
+  - id: task_easy
+    description: Single invoice, clear section, valid PAN, above threshold
+    max_steps: 6
+    difficulty: easy
+  - id: task_medium
+    description: Mixed invoice or threshold boundary, requires YTD check
+    max_steps: 8
+    difficulty: medium
+  - id: task_hard
+    description: Inoperative PAN (20% override) or GST-bundled base
+    max_steps: 8
+    difficulty: hard
+  - id: task_expert
+    description: New FY 2025-26 sections — 194T partner payment or 194Q bulk goods
+    max_steps: 10
+    difficulty: expert
+
+action_schema:
+  type: object
+  properties:
+    action_type:
+      type: string
+      enum:
+        - read_invoice
+        - check_pan
+        - check_threshold
+        - query_ytd
+        - lookup_section
+        - query_law
+        - submit_answer
+    parameters:
+      type: object
+
+observation_schema:
+  type: object
+  properties:
+    invoice_text:
+      type: string
+    action_result:
+      type: string
+    available_actions:
+      type: array
+      items:
+        type: string
+    steps_used:
+      type: integer
+    max_steps:
+      type: integer
+    hint:
+      type: string
+    done:
+      type: boolean
+    reward:
+      type: number
