@@ -189,6 +189,26 @@ observation_schema:
       type: boolean
     reward:
       type: number
+    reward_info:
+      type: object
+      additionalProperties: false
+      required:
+        - step_reward
+        - cumulative_reward
+        - components
+      properties:
+        step_reward:
+          type: number
+        cumulative_reward:
+          type: number
+        final_score:
+          type:
+            - number
+            - "null"
+        components:
+          type: object
+          additionalProperties:
+            type: number
 
 state_schema:
   type: object

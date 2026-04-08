@@ -75,12 +75,12 @@ def pan_status_message(pan: str) -> str:
     record = lookup_pan(pan)
     if record is None:
         return (f"PAN {pan} not found in registry. "
-                "TDS must be deducted at 20% (Section 206AA — missing PAN).")
+                "Section 206AA applies (typically 20%, with section-specific exceptions such as 194Q/194O at 5%).")
     if record["status"] == "inoperative":
         return (
             f"PAN {pan} ({record['name']}) is INOPERATIVE "
             f"(not linked to Aadhaar). "
-            "TDS rate: 20% regardless of section — Section 206AA applies. "
+            "Section 206AA applies (typically 20%, with section-specific exceptions such as 194Q/194O at 5%). "
             "CBDT Circular 6/2024 does not provide relief for FY 2025-26."
         )
     pan_type = record['pan_type']

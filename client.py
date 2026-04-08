@@ -9,7 +9,10 @@ from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 from openenv.core.env_server.types import State
 
-from .models import TDSAction, TDSObservation, TDSState
+try:
+    from .models import TDSAction, TDSObservation, TDSState
+except ImportError:
+    from models import TDSAction, TDSObservation, TDSState
 
 
 class LegaloomEnv(EnvClient[TDSAction, TDSObservation, TDSState]):

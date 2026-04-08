@@ -14,7 +14,8 @@ RUN pip install --no-cache-dir \
     uvicorn==0.44.0 \
     pydantic==2.12.5 \
     openai==2.30.0 \
-    httpx==0.28.1
+    httpx==0.28.1 \
+    pyyaml==6.0.2
 
 ENV PYTHONPATH="/app:$PYTHONPATH"
 
