@@ -41,7 +41,7 @@ def grade_submission(
 
     # Case 1: No TDS applicable
     if not ground_truth["tds_applicable"]:
-        correct = (submitted_amount == 0.0 or no_tds_flag)
+        correct = (submitted_amount == 0.0 and no_tds_flag)
         # 0.85 for correct, 0.10 for wrong — both strictly inside (0, 1)
         raw_score = 0.85 if correct else 0.10
         feedback.append(
@@ -107,9 +107,13 @@ def grade_submission(
     # Case 3: Section correct
     expected_section = ground_truth["section"]
     split = expected_section in ("SPLIT", "SPLIT_194J_194I")
+    split_allowed_sections = {
+        "SPLIT": {"194J", "194C"},
+        "SPLIT_194J_194I": {"194J", "194I"},
+    }
     section_ok = (
         submitted_section == expected_section or
-        (split and submitted_section in ("194J", "194I", "194C"))
+        (split and submitted_section in split_allowed_sections.get(expected_section, set()))
     )
     breakdown["section_correct"] = section_ok
     if section_ok:
@@ -135,7 +139,12 @@ def grade_submission(
 
     # Case 5: Goods exclusion
     if goods > 0:
-        goods_ok = submitted_amount <= ground_truth["taxable_amount"] + AMOUNT_TOLERANCE_INR
+        goods_ok = False
+        if submitted_rate > 0:
+            implied_taxable_base = (submitted_amount * 100.0) / submitted_rate
+            expected_taxable_base = float(ground_truth.get("taxable_amount", 0.0))
+            base_tolerance = max(AMOUNT_TOLERANCE_INR, expected_taxable_base * 0.02)
+            goods_ok = abs(implied_taxable_base - expected_taxable_base) <= base_tolerance
         breakdown["goods_excluded"] = goods_ok
         if goods_ok:
             score += W_GOODS
@@ -162,7 +171,15 @@ def grade_submission(
             f"correct is INR {ground_truth['tds_amount_inr']:,.2f}."
         )
 
-    correct = amount_ok and (section_ok or is_inop_pan)
+    no_tds_invalid_for_applicable = ground_truth.get("tds_applicable", True) and no_tds_flag
+    if no_tds_invalid_for_applicable:
+        score = max(0.0, score - 0.25)
+        feedback.append(
+            "Invalid no_tds flag for a TDS-applicable invoice. no_tds must be false."
+        )
+    breakdown["no_tds_invalid_for_applicable"] = no_tds_invalid_for_applicable
+
+    correct = amount_ok and (section_ok or is_inop_pan) and not no_tds_invalid_for_applicable
 
     # Scale raw score (0.0–1.0) into strictly open interval (_SCORE_MIN, _SCORE_MAX)
     # Perfect score maps to _SCORE_MAX; zero score maps to _SCORE_MIN.

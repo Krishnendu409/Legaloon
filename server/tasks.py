@@ -130,10 +130,8 @@ def sample_task(task_id: str, seed: Optional[int] = None) -> dict:
     if not candidates:
         raise RuntimeError(f"No invoices found for task_id={task_id!r}")
 
-    if seed is not None:
-        random.seed(seed)
-
-    chosen = random.choice(candidates)
+    rng = random.Random(seed) if seed is not None else random
+    chosen = rng.choice(candidates)
 
     return {
         "task_id":      task_id,

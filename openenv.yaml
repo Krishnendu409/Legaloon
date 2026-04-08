@@ -30,6 +30,10 @@ tasks:
 
 action_schema:
   type: object
+  additionalProperties: false
+  required:
+    - action_type
+    - parameters
   properties:
     action_type:
       type: string
@@ -43,9 +47,127 @@ action_schema:
         - submit_answer
     parameters:
       type: object
+      additionalProperties: true
+  allOf:
+    - if:
+        properties:
+          action_type:
+            const: read_invoice
+      then:
+        properties:
+          parameters:
+            type: object
+            additionalProperties: false
+    - if:
+        properties:
+          action_type:
+            const: check_pan
+      then:
+        properties:
+          parameters:
+            type: object
+            additionalProperties: false
+            required: [pan]
+            properties:
+              pan:
+                type: string
+                minLength: 10
+                maxLength: 10
+    - if:
+        properties:
+          action_type:
+            const: check_threshold
+      then:
+        properties:
+          parameters:
+            type: object
+            additionalProperties: false
+            required: [section, amount]
+            properties:
+              section:
+                type: string
+              amount:
+                type: number
+                minimum: 0
+    - if:
+        properties:
+          action_type:
+            const: query_ytd
+      then:
+        properties:
+          parameters:
+            type: object
+            additionalProperties: false
+            required: [pan]
+            properties:
+              pan:
+                type: string
+                minLength: 10
+                maxLength: 10
+    - if:
+        properties:
+          action_type:
+            const: lookup_section
+      then:
+        properties:
+          parameters:
+            type: object
+            additionalProperties: false
+            required: [description]
+            properties:
+              description:
+                type: string
+                minLength: 1
+    - if:
+        properties:
+          action_type:
+            const: query_law
+      then:
+        properties:
+          parameters:
+            type: object
+            additionalProperties: false
+            required: [section]
+            properties:
+              section:
+                type: string
+    - if:
+        properties:
+          action_type:
+            const: submit_answer
+      then:
+        properties:
+          parameters:
+            type: object
+            additionalProperties: false
+            required: [tds_amount_inr, section, rate_percent]
+            properties:
+              tds_amount_inr:
+                type: number
+                minimum: 0
+              section:
+                type: string
+              rate_percent:
+                type: number
+                minimum: 0
+              no_tds:
+                oneOf:
+                  - type: boolean
+                  - type: string
+                    enum: ["true", "false"]
 
 observation_schema:
   type: object
+  additionalProperties: false
+  required:
+    - invoice_text
+    - action_result
+    - available_actions
+    - steps_used
+    - max_steps
+    - hint
+    - done
+    - reward
   properties:
     invoice_text:
       type: string
@@ -57,11 +179,42 @@ observation_schema:
         type: string
     steps_used:
       type: integer
+      minimum: 0
     max_steps:
       type: integer
+      minimum: 1
     hint:
       type: string
     done:
       type: boolean
     reward:
       type: number
+
+state_schema:
+  type: object
+  additionalProperties: false
+  required:
+    - episode_id
+    - step_count
+    - task_id
+    - difficulty
+    - pan_checked
+    - section_identified
+    - answer_submitted
+  properties:
+    episode_id:
+      type: string
+    step_count:
+      type: integer
+      minimum: 0
+    task_id:
+      type: string
+    difficulty:
+      type: string
+      enum: [easy, medium, hard, expert]
+    pan_checked:
+      type: boolean
+    section_identified:
+      type: boolean
+    answer_submitted:
+      type: boolean
