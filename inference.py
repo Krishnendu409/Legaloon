@@ -149,8 +149,9 @@ SECTION IDENTIFICATION:
 
 CRITICAL RULES:
   1. ALWAYS check PAN status first
-  2. INOPERATIVE PAN: 20% flat, overrides ALL section rates (Section 206AA)
-  3. MISSING PAN: also 20%
+  2. INOPERATIVE/MISSING PAN: 20% flat under Section 206AA for most sections.
+     EXCEPTION: 194Q/194O apply 5% for no-PAN cases.
+  3. For 194Q/194O no-PAN cases, use 5% instead of 20%
   4. Thresholds FY 2025-26: 194J=50,000 | 194C=30,000/1,00,000 |
      194I=6,00,000/year | 194H=20,000
   5. GST shown separately: TDS on pre-GST amount

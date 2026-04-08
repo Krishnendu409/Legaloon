@@ -16,6 +16,8 @@ import os
 import random
 from typing import Optional
 
+DEFAULT_TASK_SEED = 42
+
 # ---------------------------------------------------------------------------
 # Load invoice database
 # ---------------------------------------------------------------------------
@@ -166,7 +168,7 @@ def sample_task(task_id: str, seed: Optional[int] = None) -> dict:
     if not candidates:
         raise RuntimeError(f"No invoices found for task_id={task_id!r}")
 
-    rng = random.Random(seed) if seed is not None else random
+    rng = random.Random(seed if seed is not None else DEFAULT_TASK_SEED)
     chosen = rng.choice(candidates)
     scenario_noise = _build_scenario_noise(task_id, chosen, seed)
     noisy_invoice_text = (
@@ -191,6 +193,7 @@ def sample_task(task_id: str, seed: Optional[int] = None) -> dict:
         "task_hint":       chosen["task_hint"],
         "ground_truth":    chosen["ground_truth"],
         "scenario_noise":  scenario_noise,
+        "required_evidence_actions": _required_evidence_actions(chosen["category"], task_id),
 
         # Reward breakpoints vary by difficulty
         "reward_breakpoints": _build_breakpoints(pool_config["difficulty"], chosen),
@@ -244,6 +247,22 @@ def _build_breakpoints(difficulty: str, invoice: dict) -> dict:
         bp = {k: round(v / total, 4) for k, v in bp.items()}
 
     return bp
+
+
+def _required_evidence_actions(category: str, task_id: str) -> list[str]:
+    base = ["check_pan"]
+    if category in {"mixed_invoice", "gst_bundled_tds_base"}:
+        base.append("lookup_section")
+    if category in {"threshold_boundary", "below_threshold_new_limits", "below_threshold"}:
+        base.extend(["query_ytd", "check_threshold"])
+    if task_id in {"task_hard", "task_expert"}:
+        base.append("query_law")
+    # preserve order while deduplicating
+    out = []
+    for item in base:
+        if item not in out:
+            out.append(item)
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ critical and error-prone financial back-office tasks in India.
 Every Indian company processes hundreds of vendor invoices monthly. Each invoice requires the accounts team to:
 
 1. Identify the correct TDS section (194C, 194J, 194I, 194H, 194T, 194Q…)
-2. Verify the vendor's PAN status — inoperative PAN triggers a 20% fallback rate under Section 206AA
+2. Verify the vendor's PAN status — inoperative PAN usually triggers 20% under Section 206AA (with statutory exceptions such as 194Q/194O at 5%)
 3. Check if cumulative annual payments cross the deduction threshold for that section
 4. Compute the exact INR amount to deduct, excluding goods and GST where applicable
 
@@ -61,6 +61,7 @@ Each step returns a `TDSObservation` with these fields:
 | `max_steps` | int | Maximum steps allowed for this task |
 | `hint` | str | Coaching hint (empty on hard/expert — agent must reason independently) |
 | `reward` | float | Reward for this step (always float, never None) |
+| `reward_info` | object | Typed reward payload: step_reward, cumulative_reward, final_score, components |
 | `done` | bool | True when the episode is complete |
 
 ---
@@ -106,8 +107,8 @@ There are four tasks of increasing difficulty. Each `reset()` draws a random inv
 |---|---|---|
 | Mixed invoice | 25 | Goods line items (no TDS) + service line items (TDS applies) — must split and exclude goods |
 | Threshold boundary | 20 | Single invoice below threshold but YTD + current invoice crosses it |
-| 194J Technical | 30 | IT/cloud/BPO services by company vendor — rate is 2% not 10% |
-| 194I Machinery hire | 13 | Equipment hire — rate is 2% not 10% like building rent |
+| 194J Technical | 35 | IT/cloud/BPO services by company vendor — rate is 2% not 10% |
+| 194I Machinery hire | 8 | Equipment hire — rate is 2% not 10% like building rent |
 
 **Constraints:** Valid PAN, up to 2 line items, YTD may be non-zero. Max 8 steps. Hints enabled.
 
@@ -131,7 +132,7 @@ There are four tasks of increasing difficulty. Each `reset()` draws a random inv
 
 | Category | Invoices | Challenge |
 |---|---|---|
-| Inoperative PAN | 25 | PAN not linked to Aadhaar → 20% under Section 206AA, regardless of service section |
+| Inoperative PAN | 25 | PAN not linked to Aadhaar → 20% under Section 206AA for most sections |
 | GST-bundled base | 8 | GST not itemised on invoice → TDS on full invoice amount including GST |
 | Below-threshold (new FY 2025-26 limits) | 10 | Thresholds raised: 194J ₹50k, 194I ₹6L, 194H ₹20k — agent must apply new limits |
 
@@ -139,7 +140,7 @@ There are four tasks of increasing difficulty. Each `reset()` draws a random inv
 
 **Grading:** Inoperative PAN detection earns an extra breakpoint (+0.20 on top of the base pan_checked reward). For GST-bundled invoices, computing TDS on the correct base earns a separate breakpoint (+0.15). Final amount ±₹1 tolerance.
 
-**Key rule:** If PAN is INOPERATIVE, always deduct at 20% regardless of which section would otherwise apply. This overrides everything.
+**Key rule:** If PAN is INOPERATIVE, deduct under Section 206AA (typically 20%), while honoring statutory section-level exceptions (e.g., 194Q/194O at 5%).
 
 ---
 
@@ -181,7 +182,7 @@ Rewards are shaped across the full trajectory with workflow-aware penalties.
 | Workflow violation | −0.03 to −0.05 | Calling actions out of required sequence |
 | Unknown action | −0.05 | Any unrecognised `action_type` |
 
-Each positive breakpoint is awarded **at most once per episode**. Repeated/invalid actions receive neutral or negative step rewards. Final grader score remains deterministic and bounded to the configured open-interval scoring contract.
+Each positive breakpoint is awarded **at most once per episode**. Repeated/invalid actions receive neutral or negative step rewards. Final grader score remains deterministic and bounded to the unified `[0.0, 1.0]` scoring contract.
 
 ---
 
@@ -190,13 +191,13 @@ Each positive breakpoint is awarded **at most once per episode**. Repeated/inval
 Explicit, deterministic grader functions live in `server/graders.py`:
 
 ```python
-grade_easy(params, ground_truth)    # deterministic float in configured score interval
-grade_medium(params, ground_truth)  # deterministic float in configured score interval
-grade_hard(params, ground_truth)    # deterministic float in configured score interval
-grade_expert(params, ground_truth)  # deterministic float in configured score interval
+grade_easy(params, ground_truth)    # deterministic float in [0.0, 1.0]
+grade_medium(params, ground_truth)  # deterministic float in [0.0, 1.0]
+grade_hard(params, ground_truth)    # deterministic float in [0.0, 1.0]
+grade_expert(params, ground_truth)  # deterministic float in [0.0, 1.0]
 ```
 
-All graders are **deterministic** — same inputs always produce the same score. Scores are rounded to 4 decimal places and clamped to the configured score interval.
+All graders are **deterministic** — same inputs always produce the same score. Scores are rounded to 4 decimal places and clamped to `[0.0, 1.0]`.
 
 **Grading logic for `submit_answer`:**
 
@@ -233,7 +234,7 @@ Case 3 — Normal TDS:
 | 194H | Commission / brokerage | 2% | ₹20,000 |
 | 194T | Partner payments (NEW April 2025) | 10% | ₹20,000 |
 | 194Q | Buyer's goods purchase above ₹50L | 0.1% | ₹50,00,000 |
-| 206AA | Inoperative / missing PAN | 20% | Overrides all sections |
+| 206AA | Inoperative / missing PAN | 20% (5% for 194Q/194O) | Overrides standard section rates subject to statutory exceptions |
 
 ---
 
@@ -244,7 +245,7 @@ Baseline scores depend on:
 - model choice
 - explicit seed from reset/inference inputs
 - `OPENENV_SEED` when provided
-- random fallback seed when no seed is provided
+- deterministic default seed (`OPENENV_SEED` if set, otherwise `42`)
 - strict workflow compliance (read_invoice → check_pan → section/threshold reasoning → submit_answer)
 - tool-cost penalties for overusing `lookup_section` / `query_law`
 

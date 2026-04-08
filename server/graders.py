@@ -2,12 +2,12 @@
 Explicit grader functions for LegaLoom-Env.
 
 Each grader takes the submitted answer and ground truth,
-and returns a normalised score STRICTLY in (0.0, 1.0) exclusive.
-The hackathon validator requires: score > 0.0 AND score < 1.0.
+and returns a normalised score in [0.0, 1.0].
 These functions are deterministic — same inputs always give same output.
 """
 
 from typing import Dict, Any
+from .scoring import clamp_score
 
 AMOUNT_TOLERANCE_INR = 1.0
 GST_BUNDLED_INDICATORS = (
@@ -16,18 +16,9 @@ GST_BUNDLED_INDICATORS = (
     "gst bundled",
     "gst not shown separately",
 )
-PENALTY_SECTION_RATE_MISMATCH = 0.10
-PENALTY_INOP_PAN_MISSED = 0.10
-PENALTY_REASONING_SHORTCUT = 0.08
-
-# Strict bounds — never touch 0.0 or 1.0
-_SCORE_MIN = 0.05   # minimum meaningful score (not zero)
-_SCORE_MAX = 0.95   # maximum score (not one)
-
-
-def _clamp(score: float) -> float:
-    """Clamp to strictly open interval (0.0, 1.0)."""
-    return round(min(max(float(score), _SCORE_MIN), _SCORE_MAX), 4)
+PENALTY_SECTION_RATE_MISMATCH = 0.08
+PENALTY_INOP_PAN_MISSED = 0.08
+PENALTY_REASONING_SHORTCUT = 0.05
 
 
 def grade_submission(
@@ -37,7 +28,7 @@ def grade_submission(
 ) -> Dict[str, Any]:
     """
     Primary grader. Weights adapt per task_id.
-    Always returns score strictly in (_SCORE_MIN, _SCORE_MAX).
+    Always returns score in [0.0, 1.0].
     """
     submitted_amount  = float(params.get("tds_amount_inr", -1))
     submitted_section = str(params.get("section", "")).strip().upper()
@@ -51,8 +42,7 @@ def grade_submission(
     # Case 1: No TDS applicable
     if not ground_truth["tds_applicable"]:
         correct = (submitted_amount == 0.0 and no_tds_flag)
-        # Keep non-zero floor per existing score-range contract, while strongly penalizing wrong no-TDS submissions.
-        raw_score = 0.85 if correct else 0.05
+        raw_score = 1.0 if correct else 0.0
         feedback.append(
             "Correctly identified: no TDS applicable (below threshold)."
             if correct else
@@ -61,7 +51,7 @@ def grade_submission(
         breakdown["no_tds_correct"] = correct
         breakdown["gst_base_correct"] = False
         return {
-            "score": _clamp(raw_score),
+            "score": clamp_score(raw_score),
             "correct": correct,
             "feedback": feedback,
             "breakdown": breakdown,
@@ -69,36 +59,39 @@ def grade_submission(
 
     goods = ground_truth.get("goods_amount", 0.0)
     is_inop_pan = not ground_truth["pan_valid"]
+    note_text = str(ground_truth.get("note", "")).lower()
+    gst_bundled_case = any(token in note_text for token in GST_BUNDLED_INDICATORS)
 
     # Task-specific weights that sum to 1.0
     if task_id == "task_easy":
-        W_PAN, W_SECT, W_RATE, W_GOODS, W_AMOUNT = 0.0, 0.30, 0.30, 0.0, 0.40
+        W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.0, 0.30, 0.30, 0.0, 0.0, 0.40
     elif task_id == "task_medium":
         if goods > 0:
-            W_PAN, W_SECT, W_RATE, W_GOODS, W_AMOUNT = 0.0, 0.25, 0.15, 0.20, 0.40
+            W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.0, 0.25, 0.15, 0.20, 0.0, 0.40
         else:
-            W_PAN, W_SECT, W_RATE, W_GOODS, W_AMOUNT = 0.0, 0.25, 0.15, 0.0, 0.60
+            W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.0, 0.25, 0.15, 0.0, 0.0, 0.60
     elif task_id == "task_expert":
-        W_PAN, W_SECT, W_RATE, W_GOODS, W_AMOUNT = 0.0, 0.40, 0.25, 0.0, 0.35
+        W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.0, 0.35, 0.20, 0.0, 0.10 if gst_bundled_case else 0.0, 0.45 if gst_bundled_case else 0.45
     else:  # task_hard
         if is_inop_pan:
             if goods > 0:
-                W_PAN, W_SECT, W_RATE, W_GOODS, W_AMOUNT = 0.35, 0.10, 0.15, 0.10, 0.30
+                W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.30, 0.10, 0.15, 0.10, 0.0, 0.35
             else:
-                W_PAN, W_SECT, W_RATE, W_GOODS, W_AMOUNT = 0.35, 0.10, 0.15, 0.0, 0.40
+                W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.30, 0.10, 0.15, 0.0, 0.10 if gst_bundled_case else 0.0, 0.45 if gst_bundled_case else 0.45
         else:
             if goods > 0:
-                W_PAN, W_SECT, W_RATE, W_GOODS, W_AMOUNT = 0.0, 0.20, 0.15, 0.20, 0.45
+                W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.0, 0.20, 0.15, 0.20, 0.0, 0.45
             else:
-                W_PAN, W_SECT, W_RATE, W_GOODS, W_AMOUNT = 0.0, 0.20, 0.15, 0.0, 0.65
+                W_PAN, W_SECT, W_RATE, W_GOODS, W_GST, W_AMOUNT = 0.0, 0.20, 0.15, 0.0, 0.10 if gst_bundled_case else 0.0, 0.55 if gst_bundled_case else 0.65
 
     # Normalise weights to sum=1.0
-    total_w = W_PAN + W_SECT + W_RATE + W_GOODS + W_AMOUNT
+    total_w = W_PAN + W_SECT + W_RATE + W_GOODS + W_GST + W_AMOUNT
     if total_w > 0:
         W_PAN /= total_w
         W_SECT /= total_w
         W_RATE /= total_w
         W_GOODS /= total_w
+        W_GST /= total_w
         W_AMOUNT /= total_w
 
     # Case 2: Inoperative PAN
@@ -124,6 +117,7 @@ def grade_submission(
     section_ok = (
         submitted_section == expected_section or
         (split and submitted_section in split_allowed_sections.get(expected_section, set()))
+        or (split and submitted_section in {"SPLIT", "SPLIT_194J_194I"})
     )
     breakdown["section_correct"] = section_ok
     if section_ok:
@@ -136,7 +130,22 @@ def grade_submission(
         )
 
     # Case 4: Rate correct
-    rate_ok = abs(submitted_rate - ground_truth["tds_rate_percent"]) < 0.01
+    if split:
+        blended_rate = 0.0
+        taxable = float(ground_truth.get("taxable_amount", 0.0))
+        if taxable > 0:
+            blended_rate = (float(ground_truth.get("tds_amount_inr", 0.0)) * 100.0) / taxable
+        split_component_rates = {
+            "SPLIT": {2.0, 10.0},
+            "SPLIT_194J_194I": {2.0, 10.0},
+        }.get(expected_section, {2.0, 10.0})
+        rate_ok = (
+            abs(submitted_rate - blended_rate) < 0.05
+            or abs(submitted_rate - 0.0) < 0.01
+            or any(abs(submitted_rate - r) < 0.01 for r in split_component_rates)
+        )
+    else:
+        rate_ok = abs(submitted_rate - ground_truth["tds_rate_percent"]) < 0.01
     breakdown["rate_correct"] = rate_ok
     if rate_ok:
         score += W_RATE
@@ -167,10 +176,6 @@ def grade_submission(
             )
 
     # Case 5b: GST-bundled base correctness (if applicable)
-    note_text = str(ground_truth.get("note", "")).lower()
-    gst_bundled_case = any(
-        token in note_text for token in GST_BUNDLED_INDICATORS
-    )
     gst_base_ok = False
     if gst_bundled_case and submitted_rate > 0:
         implied_taxable_base = (submitted_amount * 100.0) / submitted_rate
@@ -178,6 +183,7 @@ def grade_submission(
         base_tolerance = max(AMOUNT_TOLERANCE_INR, expected_taxable_base * 0.02)
         gst_base_ok = abs(implied_taxable_base - expected_taxable_base) <= base_tolerance
         if gst_base_ok:
+            score += W_GST
             feedback.append("GST-bundled base handled correctly (TDS on full amount).")
         else:
             feedback.append("GST-bundled case: taxable base appears incorrect.")
@@ -232,11 +238,8 @@ def grade_submission(
         and not no_tds_invalid_for_applicable
     )
 
-    # Scale raw score (0.0–1.0) into strictly open interval (_SCORE_MIN, _SCORE_MAX)
-    # Perfect score maps to _SCORE_MAX; zero score maps to _SCORE_MIN.
-    scaled = _SCORE_MIN + score * (_SCORE_MAX - _SCORE_MIN)
     return {
-        "score": _clamp(scaled),
+        "score": clamp_score(score),
         "correct": correct,
         "feedback": feedback,
         "breakdown": breakdown,

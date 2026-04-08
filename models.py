@@ -144,6 +144,19 @@ class TDSObservation(Observation):
         description="Optional guidance. Empty string on hard difficulty.",
     )
 
+    reward_info: TDSReward = Field(
+        default_factory=TDSReward,
+        description="Typed reward payload for OpenEnv Reward contract compliance.",
+    )
+
+    @model_validator(mode="after")
+    def sync_reward_info(self):
+        if self.reward_info is None:
+            self.reward_info = self.TDSReward(step_reward=float(self.reward))
+        elif self.reward_info.step_reward != float(self.reward):
+            self.reward_info.step_reward = float(self.reward)
+        return self
+
 
 class TDSState(State):
     """
@@ -174,3 +187,24 @@ class TDSState(State):
         default=False,
         description="True once agent has called submit_answer.",
     )
+    class TDSReward(BaseModel):
+        """
+        Typed reward payload that accompanies every observation.
+        """
+
+        step_reward: float = Field(
+            default=0.0,
+            description="Reward returned for this step.",
+        )
+        cumulative_reward: float = Field(
+            default=0.0,
+            description="Cumulative reward observed so far in the episode.",
+        )
+        final_score: Optional[float] = Field(
+            default=None,
+            description="Final score on terminal transition; None for intermediate steps.",
+        )
+        components: Dict[str, float] = Field(
+            default_factory=dict,
+            description="Optional normalized reward component breakdown.",
+        )
