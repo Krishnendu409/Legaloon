@@ -36,10 +36,17 @@ class LegaloomEnv(EnvClient[TDSAction, TDSObservation, TDSState]):
         }
 
     def _parse_result(self, payload: Dict) -> StepResult[TDSObservation]:
-        obs_data = payload.get("observation", {})
+        missing = [k for k in ("reward", "done") if k not in payload]
+        if missing:
+            raise ValueError(f"Invalid step payload: missing required field(s): {', '.join(missing)}")
+        obs_data = payload.get("observation")
+        if not isinstance(obs_data, dict):
+            raise ValueError("Invalid step payload: 'observation' must be an object")
+        reward = float(payload["reward"])
+        done = bool(payload["done"])
         observation = TDSObservation(
-            done=payload.get("done", False),
-            reward=payload.get("reward", 0.001),
+            done=done,
+            reward=reward,
             invoice_text=obs_data.get("invoice_text", ""),
             action_result=obs_data.get("action_result", ""),
             available_actions=obs_data.get("available_actions", []),
@@ -49,8 +56,8 @@ class LegaloomEnv(EnvClient[TDSAction, TDSObservation, TDSState]):
         )
         return StepResult(
             observation=observation,
-            reward=payload.get("reward", 0.001),
-            done=payload.get("done", False),
+            reward=reward,
+            done=done,
         )
 
     def _parse_state(self, payload: Dict) -> TDSState:

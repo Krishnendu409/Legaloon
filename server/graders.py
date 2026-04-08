@@ -10,6 +10,15 @@ These functions are deterministic — same inputs always give same output.
 from typing import Dict, Any
 
 AMOUNT_TOLERANCE_INR = 1.0
+GST_BUNDLED_INDICATORS = (
+    "inclusive of all taxes",
+    "gst included in invoice value",
+    "gst bundled",
+    "gst not shown separately",
+)
+PENALTY_SECTION_RATE_MISMATCH = 0.10
+PENALTY_INOP_PAN_MISSED = 0.10
+PENALTY_REASONING_SHORTCUT = 0.08
 
 # Strict bounds — never touch 0.0 or 1.0
 _SCORE_MIN = 0.05   # minimum meaningful score (not zero)
@@ -42,14 +51,15 @@ def grade_submission(
     # Case 1: No TDS applicable
     if not ground_truth["tds_applicable"]:
         correct = (submitted_amount == 0.0 and no_tds_flag)
-        # 0.85 for correct, 0.10 for wrong — both strictly inside (0, 1)
-        raw_score = 0.85 if correct else 0.10
+        # Keep non-zero floor per existing score-range contract, while strongly penalizing wrong no-TDS submissions.
+        raw_score = 0.85 if correct else 0.05
         feedback.append(
             "Correctly identified: no TDS applicable (below threshold)."
             if correct else
             f"No TDS required (below threshold). Submitted INR {submitted_amount:,.2f} — should be 0."
         )
         breakdown["no_tds_correct"] = correct
+        breakdown["gst_base_correct"] = False
         return {
             "score": _clamp(raw_score),
             "correct": correct,
@@ -156,6 +166,23 @@ def grade_submission(
                 f"Goods (INR {goods:,.0f}) must be excluded — TDS on services only."
             )
 
+    # Case 5b: GST-bundled base correctness (if applicable)
+    note_text = str(ground_truth.get("note", "")).lower()
+    gst_bundled_case = any(
+        token in note_text for token in GST_BUNDLED_INDICATORS
+    )
+    gst_base_ok = False
+    if gst_bundled_case and submitted_rate > 0:
+        implied_taxable_base = (submitted_amount * 100.0) / submitted_rate
+        expected_taxable_base = float(ground_truth.get("taxable_amount", 0.0))
+        base_tolerance = max(AMOUNT_TOLERANCE_INR, expected_taxable_base * 0.02)
+        gst_base_ok = abs(implied_taxable_base - expected_taxable_base) <= base_tolerance
+        if gst_base_ok:
+            feedback.append("GST-bundled base handled correctly (TDS on full amount).")
+        else:
+            feedback.append("GST-bundled case: taxable base appears incorrect.")
+    breakdown["gst_base_correct"] = gst_base_ok
+
     # Case 6: Final amount
     amount_ok = abs(submitted_amount - ground_truth["tds_amount_inr"]) <= AMOUNT_TOLERANCE_INR
     breakdown["amount_correct"] = amount_ok
@@ -179,7 +206,31 @@ def grade_submission(
         )
     breakdown["no_tds_invalid_for_applicable"] = no_tds_invalid_for_applicable
 
-    correct = amount_ok and (section_ok or is_inop_pan) and not no_tds_invalid_for_applicable
+    if not section_ok and not rate_ok:
+        score = max(0.0, score - PENALTY_SECTION_RATE_MISMATCH)
+    if is_inop_pan and not breakdown.get("pan_inoperative_detected", False):
+        score = max(0.0, score - PENALTY_INOP_PAN_MISSED)
+
+    reasoning_shortcut_suspected = (
+        amount_ok and (not section_ok or not rate_ok)
+    ) or (
+        submitted_section == ""
+        and submitted_amount >= 0.0
+        and not no_tds_flag
+        and ground_truth.get("tds_applicable", True)
+    )
+    breakdown["reasoning_shortcut_suspected"] = reasoning_shortcut_suspected
+    if reasoning_shortcut_suspected:
+        score = max(0.0, score - PENALTY_REASONING_SHORTCUT)
+        feedback.append("Answer appears under-justified: amount may be guessed without coherent section/rate reasoning.")
+
+    correct = (
+        amount_ok
+        and section_ok
+        and rate_ok
+        and (not is_inop_pan or breakdown.get("pan_inoperative_detected", False))
+        and not no_tds_invalid_for_applicable
+    )
 
     # Scale raw score (0.0–1.0) into strictly open interval (_SCORE_MIN, _SCORE_MAX)
     # Perfect score maps to _SCORE_MAX; zero score maps to _SCORE_MIN.

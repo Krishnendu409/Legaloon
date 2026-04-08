@@ -100,6 +100,42 @@ DIFFICULTY_POOLS = {
 TASK_ORDER = ["task_easy", "task_medium", "task_hard", "task_expert"]
 
 
+def _build_scenario_noise(task_id: str, chosen: dict, seed: Optional[int]) -> dict:
+    """
+    Deterministic scenario-noise generator for realism/novelty.
+    Adds non-authoritative memos that may be noisy/conflicting and
+    should be validated by proper rule reasoning.
+    """
+    combined_seed = f"{task_id}:{chosen.get('invoice_id')}:{seed}"
+    rng = random.Random(combined_seed)
+    noisy_memos = [
+        "Internal AP memo: Prior reviewer suggested 194J, pending final verification.",
+        "Vendor email note: Claims no deduction needed due to prior annual deductions.",
+        "Finance handoff note: Mentions legacy threshold interpretation from last FY.",
+        "Payment ops note: Tax treatment marked provisional until compliance check.",
+    ]
+    conflicting_memos = [
+        "Legacy note: Apply old benchmark; may conflict with current FY rule.",
+        "Ops comment: Section marker appears copied from a different contract type.",
+    ]
+    category = chosen.get("category", "")
+    gt_section = str(chosen.get("ground_truth", {}).get("section", "")).upper()
+    ambiguous = category in {
+        "mixed_invoice",
+        "threshold_boundary",
+        "gst_bundled_tds_base",
+        "inoperative_pan",
+    } or gt_section in {"SPLIT", "SPLIT_194J_194I"}
+    conflicting = task_id in {"task_hard", "task_expert"} and ambiguous and rng.random() < 0.6
+    memo = rng.choice(conflicting_memos if conflicting else noisy_memos)
+    return {
+        "ambiguous_signals": bool(ambiguous),
+        "conflicting_signal": bool(conflicting),
+        "requires_multi_step": bool(task_id in {"task_medium", "task_hard", "task_expert"}),
+        "memo": memo,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Task sampling
 # ---------------------------------------------------------------------------
@@ -132,6 +168,12 @@ def sample_task(task_id: str, seed: Optional[int] = None) -> dict:
 
     rng = random.Random(seed) if seed is not None else random
     chosen = rng.choice(candidates)
+    scenario_noise = _build_scenario_noise(task_id, chosen, seed)
+    noisy_invoice_text = (
+        f"{chosen['invoice_text']}\n\n"
+        f"[Compliance Memo - Non-authoritative]\n{scenario_noise['memo']}\n"
+        "Treat this memo as advisory only; verify against invoice facts and statutory rules."
+    )
 
     return {
         "task_id":      task_id,
@@ -142,12 +184,13 @@ def sample_task(task_id: str, seed: Optional[int] = None) -> dict:
 
         # From the sampled invoice
         "invoice_id":      chosen["invoice_id"],
-        "invoice_text":    chosen["invoice_text"],
+        "invoice_text":    noisy_invoice_text,
         "vendor_pan":      chosen["vendor_pan"],
         "cumulative_ytd":  chosen["cumulative_ytd"],
         "category":        chosen["category"],
         "task_hint":       chosen["task_hint"],
         "ground_truth":    chosen["ground_truth"],
+        "scenario_noise":  scenario_noise,
 
         # Reward breakpoints vary by difficulty
         "reward_breakpoints": _build_breakpoints(pool_config["difficulty"], chosen),

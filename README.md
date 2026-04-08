@@ -125,7 +125,7 @@ There are four tasks of increasing difficulty. Each `reset()` draws a random inv
 
 ### Task 3 — Hard (`task_hard`)
 
-**Goal:** Detect special conditions that override normal section rates — inoperative PAN, GST bundled into the taxable base, or below-threshold cases under new FY 2025-26 limits.
+**Goal:** Detect special conditions that override normal section rates — inoperative PAN, GST bundled into the taxable base, or below-threshold cases under new FY 2025-26 limits, while handling noisy/conflicting advisory memos.
 
 **Pool:** 43 invoices:
 
@@ -135,7 +135,7 @@ There are four tasks of increasing difficulty. Each `reset()` draws a random inv
 | GST-bundled base | 8 | GST not itemised on invoice → TDS on full invoice amount including GST |
 | Below-threshold (new FY 2025-26 limits) | 10 | Thresholds raised: 194J ₹50k, 194I ₹6L, 194H ₹20k — agent must apply new limits |
 
-**Constraints:** No hints. Max 8 steps. Agent must independently reason through edge cases.
+**Constraints:** No hints. Max 8 steps. Agent must independently reason through edge cases and resolve non-authoritative memo noise against statutory rules.
 
 **Grading:** Inoperative PAN detection earns an extra breakpoint (+0.20 on top of the base pan_checked reward). For GST-bundled invoices, computing TDS on the correct base earns a separate breakpoint (+0.15). Final amount ±₹1 tolerance.
 
@@ -154,7 +154,7 @@ There are four tasks of increasing difficulty. Each `reset()` draws a random inv
 | 194T — Partner payments | 8 | 194T | 10% | New section from April 2025 — partnerships paying their own partners: 10% on payments above ₹20,000/year |
 | 194Q — Bulk goods purchase | 5 | 194Q | 0.1% | Buyer deducts 0.1% on goods purchases exceeding ₹50L/year from a single vendor |
 
-**Why expert:** Section 194T was introduced in April 2025 — after most model training cutoffs. Section 194Q (0.1%) is easily confused with 194C (1–2%). The agent must use `query_law` or `lookup_section` correctly to distinguish these sections. No hints. Max 10 steps.
+**Why expert:** Section 194T was introduced in April 2025 — after most model training cutoffs. Section 194Q (0.1%) is easily confused with 194C (1–2%). Episodes also inject deterministic advisory memo noise and apply delayed reasoning penalties for under-justified answers. No hints. Max 10 steps.
 
 **Grading:** Same framework as other tasks. Partial credit awarded for correct PAN check and section identification even if the final amount is wrong.
 
@@ -175,10 +175,13 @@ Rewards are shaped across the full trajectory with workflow-aware penalties.
 | `amount_exact` | 0.30–0.50 | Final TDS amount within ±₹1 of ground truth |
 | `lookup_section` tool-cost | −0.01 to −0.08 | Discourages shortcut overuse |
 | `query_law` tool-cost | −0.02 × usage | Penalises repeated direct-law lookups |
+| Weak reasoning depth | −0.05 | Applied on submit when multi-step evidence is insufficient for scenario complexity |
+| Conflicting-signal miss | −0.05 | Applied when conflicting memo exists but no legal validation step was taken |
+| Shortcut detection | −0.08 | Applied by grader when output appears guessed without coherent section/rate reasoning |
 | Workflow violation | −0.03 to −0.05 | Calling actions out of required sequence |
 | Unknown action | −0.05 | Any unrecognised `action_type` |
 
-Each positive breakpoint is awarded **at most once per episode**. Repeated/invalid actions receive neutral or negative step rewards. Final grader score remains deterministic and bounded to [0.0, 1.0].
+Each positive breakpoint is awarded **at most once per episode**. Repeated/invalid actions receive neutral or negative step rewards. Final grader score remains deterministic and bounded to the configured open-interval scoring contract.
 
 ---
 
@@ -187,20 +190,20 @@ Each positive breakpoint is awarded **at most once per episode**. Repeated/inval
 Explicit, deterministic grader functions live in `server/graders.py`:
 
 ```python
-grade_easy(params, ground_truth)    # → float in [0.0, 1.0]
-grade_medium(params, ground_truth)  # → float in [0.0, 1.0]
-grade_hard(params, ground_truth)    # → float in [0.0, 1.0]
-grade_expert(params, ground_truth)  # → float in [0.0, 1.0]
+grade_easy(params, ground_truth)    # deterministic float in configured score interval
+grade_medium(params, ground_truth)  # deterministic float in configured score interval
+grade_hard(params, ground_truth)    # deterministic float in configured score interval
+grade_expert(params, ground_truth)  # deterministic float in configured score interval
 ```
 
-All graders are **deterministic** — same inputs always produce the same score. Scores are rounded to 4 decimal places and clamped to [0.0, 1.0].
+All graders are **deterministic** — same inputs always produce the same score. Scores are rounded to 4 decimal places and clamped to the configured score interval.
 
 **Grading logic for `submit_answer`:**
 
 ```
 Case 1 — No TDS applicable (below threshold):
-  correct no_tds=true submission  → 1.0
-  non-zero amount submitted        → 0.0
+  correct no_tds=true submission  → high score
+  non-zero amount submitted       → strong penalty
 
 Case 2 — Inoperative PAN (Section 206AA):
   rate=20% correctly applied       → +0.40
@@ -239,7 +242,9 @@ Case 3 — Normal TDS:
 Baseline scores depend on:
 
 - model choice
-- fixed evaluation seed (`OPENENV_SEED`)
+- explicit seed from reset/inference inputs
+- `OPENENV_SEED` when provided
+- random fallback seed when no seed is provided
 - strict workflow compliance (read_invoice → check_pan → section/threshold reasoning → submit_answer)
 - tool-cost penalties for overusing `lookup_section` / `query_law`
 
@@ -263,8 +268,8 @@ pip install openenv-core openai
 ### Run locally
 
 ```bash
-git clone https://github.com/aaravgupta0202/legaloom_env.git
-cd legaloom_env
+git clone https://github.com/Krishnendu409/Legaloon.git
+cd Legaloon
 pip install openenv-core fastapi uvicorn pydantic openai
 uvicorn server.app:app --host 0.0.0.0 --port 7860
 ```
@@ -305,8 +310,8 @@ Inference stdout is strict:
 
 ```
 [START] task=<task_id> env=legaloom_env model=<model> seed=<seed>
-[STEP]  step=<n> action=<str> reward=<float> done=<true|false> error=<msg|null>
-[END]   success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
+[STEP] step=<n> action=<str> reward=<float> done=<true|false> error=<msg|null>
+[END] success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
 ```
 
 Any diagnostics are emitted to stderr only.
@@ -316,7 +321,7 @@ Any diagnostics are emitted to stderr only.
 ## Project Structure
 
 ```
-legaloom_env/
+Legaloon/
 ├── inference.py                     ← Baseline inference script (all 4 tasks)
 ├── models.py                        ← TDSAction, TDSObservation, TDSState
 ├── client.py                        ← LegaloomEnv WebSocket client
@@ -334,8 +339,8 @@ legaloom_env/
 
 ---
 
-## Live Endpoint
+## Ownership & Provenance
 
-**HF Space:** https://huggingface.co/spaces/aarav0202/legaloom-env
-
-**API base:** https://aarav0202-legaloom-env.hf.space
+- Canonical repository: `Krishnendu409/Legaloon`
+- Environment package/app in this repository is the authoritative source for this submission.
+- If deployed to Hugging Face Spaces, set `API_BASE_URL`/Space URL from your own deployment outputs.
